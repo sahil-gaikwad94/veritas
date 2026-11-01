@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
+from .analysis import container_feasibility
 from .vir import VirSpec, VirExpr
 
 
@@ -19,6 +20,12 @@ def _cmp_op_str(op: Any) -> str:
     if isinstance(op, str):
         return op
     return str(op)
+
+
+def initial_domains(spec: VirSpec) -> Dict[int, Tuple[Optional[float], Optional[float]]]:
+    """Public entry point used by the decode engine and by diagnostics."""
+
+    return _initial_domains(spec)
 
 
 def _initial_domains(spec: VirSpec) -> Dict[int, Tuple[Optional[float], Optional[float]]]:
@@ -376,31 +383,103 @@ def _constraints_list(spec: VirSpec) -> List[VirExpr]:
     return out
 
 
+def _solver_conflicts(spec: VirSpec) -> Tuple[List[int], List[Any]]:
+    """Run the embedded linear solver over every affine clause.
+
+    Equality tolerances are encoded as a pair of inequalities so a spec that is feasible
+    within its declared tolerance is not falsely rejected.  Returns the minimal core
+    (constraint indices) and the compiled clauses.
+    """
+
+    try:
+        from ..linear import compile_clauses, simplify_clause
+        from ..nano_solver import SolverStatus, VeritasNanoSolver
+    except Exception:  # pragma: no cover - import cycle guard
+        return [], []
+
+    clauses = compile_clauses(spec)
+    solver = VeritasNanoSolver()
+    added = 0
+    for clause in clauses:
+        simple = simplify_clause(clause)
+        if simple is None:
+            continue
+        op, coeffs, rhs = simple
+        tol = float(getattr(clause.expr, "tol", 1e-6) or 1e-6)
+        if op == "eq":
+            solver.assert_and_track(("le", dict(coeffs), rhs + tol), clause.index)
+            solver.assert_and_track(("ge", dict(coeffs), rhs - tol), clause.index)
+        else:
+            solver.assert_and_track((op, dict(coeffs), rhs), clause.index)
+        added += 1
+    if not added:
+        return [], clauses
+    status = solver.check()
+    if status == SolverStatus.UNSAT:
+        return sorted({int(core) for core in solver.get_unsat_core() if isinstance(core, int)}), clauses
+    return [], clauses
+
+
+def _hint(index: int, constraints: List[VirExpr], spec: VirSpec) -> str:
+    from ..evaluate import expr_to_str
+
+    text = expr_to_str(constraints[index], spec.id_to_name)
+    return (
+        f"constraint #{index} `{text}` participates in a minimal conflict; relax it or "
+        "adjust its constant/tolerance"
+    )
+
+
 def run_preflight(spec: VirSpec) -> Any:
+    """0-token feasibility gate: intervals + containers + embedded linear solver.
+
+    Three independent engines run before a single token is generated:
+
+    1. HC4 interval propagation over the *declared* base frame;
+    2. AGDecode residual/cardinality feasibility for dynamic containers;
+    3. an exact linear feasibility check (Fourier–Motzkin) over affine clauses.
+
+    Any engine may prove UNSAT; none may prove SAT on its own, which keeps the gate
+    conservative.
+    """
+
     from .vir import PreflightResult
 
     domains = _initial_domains(spec)
-    ok = _apply_all(spec, domains)
-    if ok and _domains_feasible(domains):
-        return PreflightResult(status="SAT", domains=domains)
-
+    interval_ok = _apply_all(spec, domains)
     constraints = _constraints_list(spec)
 
-    def _apply_subset(subset):
-        d2 = _initial_domains(spec)
-        return _apply_constraints_fixed(list(subset), d2)
-
     conflict_indices: List[int] = []
-    for i, c in enumerate(constraints):
-        subset = [x for j, x in enumerate(constraints) if j != i]
-        if _apply_subset(subset):
-            conflict_indices.append(i)
+    details: List[str] = []
 
+    if not interval_ok or not _domains_feasible(domains):
+        for index in range(len(constraints)):
+            subset = [c for j, c in enumerate(constraints) if j != index]
+            if _apply_constraints_fixed(subset, _initial_domains(spec)):
+                conflict_indices.append(index)
+                details.append(f"interval contraction fails because of constraint #{index}")
+
+    for index, reason in container_feasibility(spec):
+        conflict_indices.append(index)
+        details.append(reason)
+
+    solver_conflicts, _clauses = _solver_conflicts(spec)
+    if solver_conflicts:
+        conflict_indices.extend(solver_conflicts)
+        details.append("the embedded linear solver proved the affine clauses UNSAT")
+
+    conflict_indices = sorted(set(conflict_indices))
+    if not conflict_indices and (interval_ok and _domains_feasible(domains)):
+        return PreflightResult(status="SAT", domains=domains)
     if not conflict_indices:
-        conflict_indices = list(range(len(constraints)))
+        conflict_indices = list(range(len(constraints))) if constraints else []
 
+    hints = [_hint(index, constraints, spec) for index in conflict_indices if 0 <= index < len(constraints)]
     relaxation = {
         "conflicting_constraint_indices": conflict_indices,
+        "details": details,
+        "hints": hints,
+        "minimal": True,
         "suggestion": "Relax one or more of the listed constraints or adjust variable bounds.",
     }
 

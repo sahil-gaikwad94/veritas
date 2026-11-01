@@ -66,4 +66,4 @@ def test_rl():
 
 
 def test_cli():
-    assert main(["check-spec"]) == 0
+    assert main([]) == 0

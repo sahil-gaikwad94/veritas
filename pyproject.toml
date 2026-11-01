@@ -11,6 +11,9 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[project.scripts]
+veritas = "veritas.cli.main:main"
+
 [project.optional-dependencies]
 z3 = ["z3-solver>=4.13"]
 cas = ["sympy>=1.12", "numpy>=1.26"]
@@ -24,3 +27,4 @@ module-name = "veritas._native"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["python"]
+addopts = "-q"

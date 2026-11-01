@@ -24,12 +24,27 @@ def _python_type_to_vir_type(annotation: Any) -> VirType:
     except Exception:
         pass
 
+    # Optional[T] / Union[T, None] -> treat as T (nullability is a JSON concern, not a
+    # numeric-domain one).
+    try:
+        import types
+        import typing
+        origin_now = typing.get_origin(annotation)
+        if origin_now in (typing.Union, types.UnionType):
+            candidates = [a for a in typing.get_args(annotation) if a is not type(None)]
+            if len(candidates) == 1:
+                return _python_type_to_vir_type(candidates[0])
+    except Exception:
+        pass
+
     if annotation is float:
         return VirType.real()
     if annotation is int:
         return VirType.int()
     if annotation is bool:
         return VirType.bool()
+    if annotation is str:
+        return VirType(kind="string")
     # Enum -> finite set
     try:
         import enum
@@ -46,14 +61,12 @@ def _python_type_to_vir_type(annotation: Any) -> VirType:
     except Exception:
         pass
     if annotation is dict or origin is dict:
-        val_type = args[1] if args and len(args) > 1 else float
-        val_min = 0.0
-        val_max = 1.0
-        if val_type is float:
-            val_min, val_max = 0.0, 1.0
-        return VirType.dynamic_map(val_min=val_min, val_max=val_max)
+        # Bare `dict` / `dict[str, float]` with no declared element bounds is left
+        # unconstrained: inventing [0, 1] here would make unrelated schemas look
+        # infeasible.  `vt.forall(...)` supplies real element bounds during analysis.
+        return VirType.dynamic_map(val_min=float("-inf"), val_max=float("inf"))
     if annotation is list or origin is list:
-        return VirType.dynamic_map()  # treat as dynamic container
+        return VirType.dynamic_map(val_min=float("-inf"), val_max=float("inf"))
     # Optional / Union fallback
     if origin is not None:
         return VirType(kind="complex")

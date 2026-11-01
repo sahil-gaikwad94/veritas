@@ -1,10 +1,22 @@
-"""Phase 3: 0-DoF evaluator and cascaded expression scheduler."""
+"""0-DoF deterministic evaluation, cascaded scheduling and Jump-Forward splicing.
+
+A schema field is *0-DoF* when every input of its derivation is already bound: the model
+has nothing left to decide, so ``veritas`` computes the value exactly, formats it, and
+splices the whole syntactic fragment into the token stream in one batched prefill.
+
+This module owns the evaluator/scheduler.  It deliberately delegates expression semantics
+to :mod:`veritas.evaluate` so there is exactly one definition of what a constraint means
+across verification, decoding and proof checking.
+"""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from .evaluate import eval_expr
+from .json_pda import render_continuation
 
 
 @dataclass
@@ -17,38 +29,116 @@ class ZeroDofRule:
     precision_digits: int = 6
 
 
+def _lookup(values: Mapping[Any, Any], key: Any, aliases: Mapping[Any, Any]) -> Tuple[bool, Any]:
+    if key in values:
+        return True, values[key]
+    alias = aliases.get(key)
+    if alias is not None and alias in values:
+        return True, values[alias]
+    return False, None
+
+
 class ZeroDofEngine:
     def __init__(self, rules: Optional[List[ZeroDofRule]] = None):
-        self.rules = list(rules or [])
+        self.rules: List[ZeroDofRule] = list(rules or [])
         self.cache: Dict[Any, Any] = {}
+        # Optional id/name aliasing used when rules come from a compiled spec.
+        self._aliases: Dict[Any, Any] = {}
+        self.last_splice: str = ""
+        self.jump_forward_fields: List[str] = []
+
+    # -- construction ----------------------------------------------------
+    @classmethod
+    def from_spec(cls, spec: Any) -> "ZeroDofEngine":
+        engine = cls()
+        aliases: Dict[Any, Any] = {}
+        for rule in getattr(spec, "zero_dof_rules", []) or []:
+            target = rule.target_json_key
+            if target is None and isinstance(rule.target_var, int):
+                target = spec.id_to_name.get(rule.target_var)
+            inputs: List[Any] = []
+            for item in rule.input_vars:
+                if isinstance(item, int):
+                    name = spec.id_to_name.get(item)
+                    if name is not None:
+                        inputs.append(name)
+                        aliases[item] = name
+                        aliases[name] = item
+                    else:
+                        inputs.append(item)
+                else:
+                    inputs.append(item)
+                    vid = spec.name_to_id.get(str(item))
+                    if vid is not None:
+                        aliases[item] = vid
+                        aliases[vid] = item
+            engine.add_rule(
+                ZeroDofRule(
+                    target_var=rule.target_var,
+                    target_json_key=target,
+                    input_vars=inputs,
+                    rhs_eval=rule.rhs_eval,
+                    rhs_expr=rule.rhs_expr,
+                    precision_digits=getattr(rule, "precision_digits", 6),
+                )
+            )
+        engine._aliases = aliases
+        return engine
 
     def add_rule(self, rule: ZeroDofRule) -> None:
         self.rules.append(rule)
 
-    def is_ready(self, target_var: Any, values: Dict[Any, Any]) -> bool:
+    # -- readiness -------------------------------------------------------
+    def _rule_for(self, target_var: Any) -> Optional[ZeroDofRule]:
+        for rule in self.rules:
+            if rule.target_var == target_var or rule.target_json_key == target_var:
+                return rule
+        return None
+
+    def is_ready(self, target_var: Any, values: Mapping[Any, Any]) -> bool:
         rule = self._rule_for(target_var)
         if rule is None:
             return False
-        return all(v in values for v in rule.input_vars)
+        return all(_lookup(values, dep, self._aliases)[0] for dep in rule.input_vars)
 
-    def evaluate(self, target_var: Any, values: Dict[Any, Any]) -> Any:
+    def pending(self, values: Mapping[Any, Any]) -> List[ZeroDofRule]:
+        out: List[ZeroDofRule] = []
+        for rule in self.rules:
+            target = rule.target_json_key if rule.target_json_key is not None else rule.target_var
+            if _lookup(values, target, self._aliases)[0]:
+                continue
+            if all(_lookup(values, dep, self._aliases)[0] for dep in rule.input_vars):
+                out.append(rule)
+        return out
+
+    # -- evaluation ------------------------------------------------------
+    def evaluate(self, target_var: Any, values: Mapping[Any, Any]) -> Any:
         rule = self._rule_for(target_var)
         if rule is None:
             return None
-        if rule.rhs_eval is not None:
-            val = rule.rhs_eval(values)
-        elif rule.rhs_expr is not None:
-            val = _eval_expr(rule.rhs_expr, values)
-            # if rhs_expr is a compare, take rhs
-            if val is None and getattr(rule.rhs_expr, "kind", None) == "compare":
-                val = _eval_expr(rule.rhs_expr.rhs, values)
+        if not all(_lookup(values, dep, self._aliases)[0] for dep in rule.input_vars):
+            return None
+        if callable(rule.rhs_eval):
+            try:
+                value = rule.rhs_eval(dict(values))
+            except Exception:
+                return None
         else:
-            val = None
-        if val is not None:
-            self.cache[target_var] = val
-        return val
+            expr = rule.rhs_expr
+            if expr is None:
+                return None
+            if getattr(expr, "kind", None) == "compare":
+                expr = expr.rhs if expr.rhs is not None else expr.lhs
+            value = eval_expr(expr, values)
+        if value is None:
+            return None
+        precision = max(0, int(getattr(rule, "precision_digits", 6) or 0))
+        if isinstance(value, float) and precision:
+            value = round(value, precision)
+        self.cache[rule.target_json_key or rule.target_var] = value
+        return value
 
-    def evaluate_cascade(self, values: Dict[Any, Any]) -> Dict[Any, Any]:
+    def evaluate_cascade(self, values: Mapping[Any, Any]) -> Dict[Any, Any]:
         result = dict(values)
         changed = True
         passes = 0
@@ -56,25 +146,70 @@ class ZeroDofEngine:
             changed = False
             passes += 1
             for rule in self.rules:
-                if rule.target_var in result:
+                target = rule.target_json_key if rule.target_json_key is not None else rule.target_var
+                present, _ = _lookup(result, target, self._aliases)
+                if present:
                     continue
-                if all(v in result for v in rule.input_vars):
-                    val = self.evaluate(rule.target_var, result)
-                    if val is not None:
-                        result[rule.target_var] = val
-                        changed = True
+                value = self.evaluate(rule.target_var, result)
+                if value is None:
+                    continue
+                result[target] = value
+                if rule.target_var is not None:
+                    result[rule.target_var] = value
+                changed = True
         return result
 
+    def compute_ready(self, values: Mapping[Any, Any]) -> Dict[str, Any]:
+        """Evaluate every currently-ready rule; return only newly computed fields."""
+
+        computed: Dict[str, Any] = {}
+        result = dict(values)
+        for _ in range(100):
+            progress = False
+            for rule in self.pending(result):
+                target = rule.target_json_key if rule.target_json_key is not None else rule.target_var
+                value = self.evaluate(rule.target_var, result)
+                if value is None:
+                    continue
+                computed[str(target)] = value
+                result[target] = value
+                if rule.target_var is not None:
+                    result[rule.target_var] = value
+                progress = True
+            if not progress:
+                break
+        self.jump_forward_fields = list(computed.keys())
+        return computed
+
+    # -- splicing --------------------------------------------------------
     def format_value(self, value: Any, precision_digits: int = 6) -> str:
-        if isinstance(value, float):
-            return f"{value:.{precision_digits}f}".rstrip("0").rstrip(".")
+        from .json_pda import json_number
+
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return json_number(value, precision_digits)
         return str(value)
 
-    def _rule_for(self, target_var: Any) -> Optional[ZeroDofRule]:
-        for r in self.rules:
-            if r.target_var == target_var:
-                return r
-        return None
+    def splice_json(
+        self,
+        values: Mapping[Any, Any],
+        keys: Optional[Sequence[str]] = None,
+        precision: Optional[Mapping[str, int]] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Return the Jump-Forward continuation text plus the fields it computed."""
+
+        computed = self.compute_ready(values)
+        if not computed:
+            self.last_splice = ""
+            return "", {}
+        precision_map = dict(precision or {})
+        for rule in self.rules:
+            name = rule.target_json_key
+            if name and name not in precision_map:
+                precision_map[name] = max(0, int(rule.precision_digits or 0))
+        order = [k for k in (keys or []) if k in computed] or list(computed.keys())
+        text = render_continuation(computed, order, precision_map)
+        self.last_splice = text
+        return text, computed
 
 
 # aliases
@@ -84,234 +219,18 @@ ZeroDofScheduler = ZeroDofEngine
 CascadedEvaluator = ZeroDofEngine
 
 
-def _eval_expr(expr, values):
-    if expr is None:
-        return None
-    kind = getattr(expr, "kind", None)
-    if kind in ("const_real", "const_int"):
-        return expr.value
-    if kind == "const_value":
-        return expr.value
-    if kind == "const_bool":
-        return expr.value
-    if kind == "const_str":
-        return expr.value
-    if kind == "const_list":
-        return expr.value
-    if kind == "const_dict":
-        return expr.value
-    if kind == "const_set":
-        return expr.value
-    if kind == "var":
-        vid = getattr(expr, "var_id", None)
-        if vid is not None and vid in values:
-            return values[vid]
-        name = getattr(expr, "name", None)
-        if name is not None and name in values:
-            return values[name]
-        return None
-    if kind == "name":
-        name = getattr(expr, "name", None)
-        if name in values:
-            return values[name]
-        return None
-    if kind == "values":
-        args = getattr(expr, "args", []) or []
-        base = _eval_expr(args[0], values) if args else None
-        if isinstance(base, dict):
-            return list(base.values())
-        if isinstance(base, (list, tuple)):
-            return list(base)
-        return base
-    if kind == "subscript":
-        args = getattr(expr, "args", []) or []
-        base = _eval_expr(args[0], values) if args else None
-        key = getattr(expr, "value", None)
-        if isinstance(base, dict):
-            return base.get(key)
-        if isinstance(base, (list, tuple)):
-            try:
-                return base[key]
-            except Exception:
-                return None
-        return None
-    if kind == "add":
-        a = _eval_binary(expr, values, 0)
-        b = _eval_binary(expr, values, 1)
-        if a is None or b is None:
-            # try lhs/rhs
-            la = _eval_expr(getattr(expr, "lhs", None), values)
-            ra = _eval_expr(getattr(expr, "rhs", None), values)
-            if la is None:
-                la = a
-            if ra is None:
-                ra = b
-            if la is None or ra is None:
-                return None
-            return la + ra
-        return a + b
-    if kind == "sub":
-        a = _eval_expr(getattr(expr, "lhs", None), values)
-        b = _eval_expr(getattr(expr, "rhs", None), values)
-        if a is None:
-            args = getattr(expr, "args", []) or []
-            a = _eval_expr(args[0], values) if len(args) > 0 else None
-            b = _eval_expr(args[1], values) if len(args) > 1 else b
-        if a is None or b is None:
-            return None
-        return a - b
-    if kind == "mul":
-        a = _eval_expr(getattr(expr, "lhs", None), values)
-        b = _eval_expr(getattr(expr, "rhs", None), values)
-        if a is None or b is None:
-            args = getattr(expr, "args", []) or []
-            a = _eval_expr(args[0], values) if len(args) > 0 else a
-            b = _eval_expr(args[1], values) if len(args) > 1 else b
-        if a is None or b is None:
-            return None
-        return a * b
-    if kind == "div":
-        a = _eval_expr(getattr(expr, "lhs", None), values)
-        b = _eval_expr(getattr(expr, "rhs", None), values)
-        if a is None or b is None:
-            args = getattr(expr, "args", []) or []
-            a = _eval_expr(args[0], values) if len(args) > 0 else a
-            b = _eval_expr(args[1], values) if len(args) > 1 else b
-        if a is None or b is None or b == 0:
-            return None
-        return a / b
-    if kind == "neg":
-        args = getattr(expr, "args", []) or []
-        a = _eval_expr(getattr(expr, "lhs", None), values)
-        if a is None and args:
-            a = _eval_expr(args[0], values)
-        if a is None:
-            return None
-        return -a
-    if kind == "sqrt":
-        args = getattr(expr, "args", []) or []
-        a = _eval_expr(args[0], values) if args else _eval_expr(getattr(expr, "lhs", None), values)
-        if a is None:
-            return None
-        try:
-            import math as _m
-            return _m.sqrt(a)
-        except Exception:
-            return None
-    if kind == "pow":
-        a = _eval_expr(getattr(expr, "lhs", None), values)
-        b = _eval_expr(getattr(expr, "rhs", None), values)
-        if a is None or b is None:
-            args = getattr(expr, "args", []) or []
-            a = _eval_expr(args[0], values) if len(args) > 0 else a
-            b = _eval_expr(args[1], values) if len(args) > 1 else b
-        if a is None or b is None:
-            return None
-        return a ** b
-    if kind == "dot":
-        args = getattr(expr, "args", []) or []
-        w = _eval_expr(args[0], values) if args else None
-        r = getattr(expr, "value", None)
-        if r is None and len(args) > 1:
-            r = _eval_expr(args[1], values)
-        if isinstance(w, dict):
-            if isinstance(r, dict):
-                return sum(w.get(k, 0) * r.get(k, 0) for k in (set(w) | set(r)))
-            try:
-                return sum(a * b for a, b in zip(list(w.values()), r))
-            except Exception:
-                return None
-        try:
-            return sum(a * b for a, b in zip(w, r))
-        except Exception:
-            return None
-    if kind == "quad_form_cholesky":
-        args = getattr(expr, "args", []) or []
-        w = _eval_expr(args[0], values) if args else None
-        cov = getattr(expr, "value", None)
-        try:
-            from veritas.decorators import quad_form as _qf
-            return _qf(w, cov)
-        except Exception:
-            pass
-        # manual
-        if isinstance(w, dict) and isinstance(cov, dict):
-            keys = list(w.keys())
-            vec = [w[k] for k in keys]
-            n = len(keys)
-            mat = [[0.0] * n for _ in range(n)]
-            for (a, b), v in cov.items():
-                if a in keys and b in keys:
-                    i = keys.index(a); j = keys.index(b)
-                    mat[i][j] = float(v)
-            total = 0.0
-            for i in range(n):
-                for j in range(n):
-                    total += vec[i] * mat[i][j] * vec[j]
-            return total
-        return None
-    if kind == "sum":
-        args = getattr(expr, "args", []) or []
-        a = _eval_expr(args[0], values) if args else None
-        if isinstance(a, (list, tuple)):
-            return sum(a)
-        if isinstance(a, dict):
-            return sum(a.values())
-        return a
-    if kind == "compare":
-        # for derive, evaluate rhs
-        r = _eval_expr(getattr(expr, "rhs", None), values)
-        if r is not None:
-            return r
-        return _eval_expr(getattr(expr, "lhs", None), values)
-    if kind == "keys_subset":
-        args = getattr(expr, "args", []) or []
-        d = _eval_expr(args[0], values) if args else None
-        allowed = getattr(expr, "value", None)
-        try:
-            return set(d.keys()).issubset(set(allowed))
-        except Exception:
-            return None
-    if kind == "forall":
-        # best effort: evaluate predicate over iterable
-        it = getattr(expr, "iterable", None)
-        pred = getattr(expr, "predicate", None)
-        iterable = _eval_expr(it, values) if it is not None else None
-        if iterable is None:
-            # maybe it is a values expr already
-            iterable = _eval_expr(it, values) if hasattr(it, "kind") else it
-        if iterable is None:
-            return None
-        try:
-            elems = list(iterable) if not isinstance(iterable, dict) else list(iterable.values())
-        except Exception:
-            return None
-        # predicate may reference elem via lambda; we can't eval easily; return None
-        return None
-    if kind == "sqrt":
-        args = getattr(expr, "args", []) or []
-        a = _eval_expr(args[0], values) if args else _eval_expr(getattr(expr, "lhs", None), values)
-        if a is None:
-            return None
-        try:
-            return math.sqrt(a)
-        except Exception:
-            return None
-    if kind in ("and", "or"):
-        args = getattr(expr, "args", []) or []
-        vals = [_eval_expr(a, values) for a in args]
-        if kind == "and":
-            return all(bool(v) for v in vals if v is not None) if vals else None
-        return any(bool(v) for v in vals if v is not None) if vals else None
-    return None
+def _eval_expr(expr: Any, values: Mapping[Any, Any]) -> Any:
+    """Backwards-compatible free function delegating to the canonical evaluator."""
+
+    return eval_expr(expr, values)
 
 
-def _eval_binary(expr, values, idx):
-    args = getattr(expr, "args", []) or []
-    if idx < len(args):
-        return _eval_expr(args[idx], values)
-    if idx == 0:
-        return _eval_expr(getattr(expr, "lhs", None), values)
-    if idx == 1:
-        return _eval_expr(getattr(expr, "rhs", None), values)
-    return None
+__all__ = [
+    "CascadedEvaluator",
+    "DeterministicCollapse",
+    "ZeroDof",
+    "ZeroDofEngine",
+    "ZeroDofRule",
+    "ZeroDofScheduler",
+    "_eval_expr",
+]

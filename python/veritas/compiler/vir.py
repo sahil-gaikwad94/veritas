@@ -115,6 +115,71 @@ class SoftPreference:
 
 
 @dataclass
+class ContainerInfo:
+    """Static facts about a dynamic container (``dict`` / ``list``) field.
+
+    The compiler infers these from ``vt.keys_subset`` and ``vt.forall`` so the
+    pre-flight gate and the decode engine can apply AGDecode-style residual
+    reasoning instead of treating the container as an opaque blob.
+    """
+
+    var_id: int
+    name: str = ""
+    universe: Optional[List[str]] = None
+    min_len: int = 0
+    max_len: Optional[int] = None
+    elem_min: float = float("-inf")
+    elem_max: float = float("inf")
+    target_sum: Optional[float] = None
+    sum_tol: float = 1e-6
+
+    def cardinality_bounds(self) -> tuple:
+        lo = max(0, self.min_len)
+        hi = self.max_len if self.max_len is not None else (len(self.universe) if self.universe else None)
+        return lo, hi
+
+    def residual_feasible(self, current_sum: float, emitted: int) -> bool:
+        """AGDecode residual lookahead in closed form.
+
+        Is there a completion length ``m`` such that the remaining target sum can be
+        produced by ``m`` elements each in ``[elem_min, elem_max]``?
+        """
+
+        if self.target_sum is None:
+            return True
+        lo_len, hi_len = self.cardinality_bounds()
+        if hi_len is None:
+            # Unbounded cardinality: feasibility only needs a reachable residual sign.
+            remaining = self.target_sum - current_sum
+            if self.elem_min <= 0 <= self.elem_max:
+                return True
+            return (remaining >= 0) == (self.elem_min > 0)
+        m_min = max(0, lo_len - emitted)
+        m_max = hi_len - emitted
+        if m_max < 0:
+            return False
+        remaining = self.target_sum - current_sum
+        for m in range(m_min, m_max + 1):
+            if m * self.elem_min - 1e-12 <= remaining <= m * self.elem_max + 1e-12:
+                return True
+        return False
+
+    def residual_interval(self, current_sum: float, emitted: int) -> tuple:
+        """Bounds on the next element implied by the residual accumulator."""
+
+        lo_len, hi_len = self.cardinality_bounds()
+        if self.target_sum is None or hi_len is None:
+            return (self.elem_min, self.elem_max)
+        m_max = max(0, hi_len - emitted)
+        m_min = max(0, lo_len - emitted)
+        remaining = self.target_sum - current_sum
+        # next element x must leave room for [m_min-1, m_max-1] successors
+        lo = self.elem_min if m_max <= 1 else max(self.elem_min, remaining - (m_max - 1) * self.elem_max)
+        hi = self.elem_max if m_min <= 1 else min(self.elem_max, remaining - (m_min - 1) * self.elem_min)
+        return (lo, hi)
+
+
+@dataclass
 class VirSpec:
     model: Any = None
     variables: Dict[int, Dict[str, Any]] = field(default_factory=dict)
@@ -126,10 +191,17 @@ class VirSpec:
     prefers: List[VirExpr] = field(default_factory=list)
     zero_dof_rules: List[ZeroDofRule] = field(default_factory=list)
     soft_preferences: List[SoftPreference] = field(default_factory=list)
+    containers: Dict[int, ContainerInfo] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
 
     def all_constraints(self) -> List[VirExpr]:
         return list(self.requires) + list(self.derives)
+
+    def derived_names(self) -> List[str]:
+        return [r.target_json_key for r in self.zero_dof_rules if r.target_json_key]
+
+    def is_derived(self, name: str) -> bool:
+        return name in self.derived_names()
 
 
 @dataclass
