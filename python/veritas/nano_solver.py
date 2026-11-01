@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
-import copy
+import time
 
 
 class SolverStatus(str, Enum):
@@ -55,6 +55,8 @@ class VeritasNanoSolver:
         return self.check_with_timeout(None)
 
     def check_with_timeout(self, timeout_ms: Optional[int] = None) -> SolverStatus:
+        started = time.monotonic()
+        deadline = None if timeout_ms is None else started + max(0, timeout_ms) / 1000.0
         # Difference logic
         diff_cons = [c for c in self.constraints if c.kind == "diff"]
         if diff_cons:
@@ -62,12 +64,15 @@ class VeritasNanoSolver:
             if status == SolverStatus.UNSAT:
                 self._last_core = core
                 return status
+            if status == SolverStatus.UNKNOWN:
+                self._last_core = []
+                return status
         # LRA
         lra_cons = [c for c in self.constraints if c.kind in ("lra", "bound")]
         if lra_cons:
-            status, core = self._check_lra(lra_cons)
-            if status == SolverStatus.UNSAT:
-                self._last_core = core
+            status, core = self._check_lra(lra_cons, deadline=deadline)
+            if status != SolverStatus.SAT:
+                self._last_core = core if status == SolverStatus.UNSAT else []
                 return status
         self._last_core = []
         return SolverStatus.SAT
@@ -229,7 +234,9 @@ class VeritasNanoSolver:
         return SolverStatus.SAT, []
 
     # ---- lra check ----
-    def _check_lra(self, cons: List[_Constraint]) -> Tuple[SolverStatus, List[Any]]:
+    def _check_lra(
+        self, cons: List[_Constraint], deadline: Optional[float] = None
+    ) -> Tuple[SolverStatus, List[Any]]:
         # Build list of inequalities (coeffs dict, rhs) meaning sum coeff*var <= rhs
         ineqs: List[Tuple[Dict[Any, float], float]] = []
         for c in cons:
@@ -255,20 +262,43 @@ class VeritasNanoSolver:
                 ineqs.append(({k: -val for k, val in coeffs.items()}, -rhs))
             else:
                 ineqs.append((coeffs, rhs))
-        variables = set(self.variables)
-        # if no variables, check constants
-        feasible = self._fourier_motzkin(ineqs, variables)
+        variables = set()
+        for constraint in cons:
+            data = constraint.data
+            if constraint.kind == "bound":
+                variables.add(data["var"])
+            else:
+                variables.update((data.get("coeffs") or {}).keys())
+        # Deterministic variable order keeps cores reproducible across runs.
+        variables = set(sorted(variables, key=repr))
+        feasible = self._fourier_motzkin(ineqs, variables, deadline=deadline)
+        if feasible is None:
+            return SolverStatus.UNKNOWN, []
         if feasible:
             return SolverStatus.SAT, []
         # deletion-based core
-        core = self._deletion_core(cons, ineqs, variables)
+        core = self._deletion_core(cons, ineqs, variables, deadline=deadline)
         return SolverStatus.UNSAT, core
 
-    def _fourier_motzkin(self, ineqs: List[Tuple[Dict[Any, float], float]], variables: Set[Any]) -> bool:
+    def _fourier_motzkin(
+        self,
+        ineqs: List[Tuple[Dict[Any, float], float]],
+        variables: Set[Any],
+        *,
+        deadline: Optional[float] = None,
+    ) -> Optional[bool]:
+        """Exact linear feasibility by Fourier–Motzkin elimination.
+
+        Returns ``True``/``False`` or ``None`` when the budget is exhausted; ``None`` must
+        be treated as *unknown*, never as satisfiable.
+        """
+
         ineqs = [(dict(c), float(r)) for c, r in ineqs]
-        vars_list = list(variables)
+        vars_list = sorted(variables, key=repr)
         tol = 1e-9
         for v in vars_list:
+            if deadline is not None and time.monotonic() > deadline:
+                return None
             pos = [ineq for ineq in ineqs if ineq[0].get(v, 0.0) > tol]
             neg = [ineq for ineq in ineqs if ineq[0].get(v, 0.0) < -tol]
             zero = [ineq for ineq in ineqs if abs(ineq[0].get(v, 0.0)) <= tol]
@@ -276,6 +306,8 @@ class VeritasNanoSolver:
                 ineqs = zero + [i for i in ineqs if i not in zero and i not in pos and i not in neg] + pos + neg
                 # drop v from all (not necessary)
                 continue
+            if len(pos) * len(neg) + len(zero) > 50_000:
+                return None
             new_ineqs = list(zero)
             for p in pos:
                 for n in neg:
@@ -298,7 +330,9 @@ class VeritasNanoSolver:
                     return False
         return True
 
-    def _deletion_core(self, cons: List[_Constraint], ineqs, variables) -> List[Any]:
+    def _deletion_core(
+        self, cons: List[_Constraint], ineqs, variables, *, deadline: Optional[float] = None
+    ) -> List[Any]:
         # try remove one constraint at a time
         core: List[Any] = []
         for i, c in enumerate(cons):
@@ -326,7 +360,10 @@ class VeritasNanoSolver:
                     sub_ineqs.append(({k: -val for k, val in coeffs.items()}, -rhs))
                 else:
                     sub_ineqs.append((coeffs, rhs))
-            if self._fourier_motzkin(sub_ineqs, variables):
+            if deadline is not None and time.monotonic() > deadline:
+                return [c.tracker for c in cons]
+            result = self._fourier_motzkin(sub_ineqs, variables, deadline=deadline)
+            if result is True or result is None:
                 core.append(c.tracker)
         if not core:
             core = [c.tracker for c in cons]

@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - numpy optional
 from .vir import VirExpr, VirSpec, VirType, ZeroDofRule, SoftPreference
 from .dependency_graph import DependencyGraph
 from .schema_lowering import lower_pydantic_model, _python_type_to_vir_type
+from .analysis import analyze_containers
 
 
 class TranspileError(Exception):
@@ -40,10 +41,7 @@ class AstTranspiler:
         lowered = lower_pydantic_model(model)
         self.graph: DependencyGraph = lowered["graph"]
         self.var_table = lowered["var_table"]
-        self.var_ids: Dict[str, int] = {name: info["var_id"] for name, info in zip(
-            [f["name"] for f in lowered["fields"]],
-            lowered["fields"],
-        )} if False else {f["name"]: f["var_id"] for f in lowered["fields"]}
+        self.var_ids: Dict[str, int] = {f["name"]: f["var_id"] for f in lowered["fields"]}
         # name->id map convenience
         self.name_to_id: Dict[str, int] = dict(self.graph.name_to_id)
         self.id_to_name: Dict[int, str] = dict(self.graph.id_to_name)
@@ -94,8 +92,10 @@ class AstTranspiler:
             soft_preferences=self.soft_preferences,
             config=dict(self.config),
         )
-        # topological order
+        # topological order (free variables before their 0-DoF dependents)
         spec.field_order = self.graph.topological_order()
+        # container universe / element bounds / residual-sum targets
+        spec.containers = analyze_containers(spec)
         return spec
 
     # ---------- top-level handlers ----------

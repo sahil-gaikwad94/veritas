@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import functools
 import inspect
 from typing import Any, Callable, Dict, List, Optional
@@ -71,6 +72,44 @@ class VerifiedSchema:
     def __repr__(self):
         return f"VerifiedSchema({self.name})"
 
+    # ---- concrete verification / derivation ----------------------------
+    def verify(self, instance: Any, *, derive_missing: bool = True):
+        """Check a concrete instance and return a :class:`VerificationReport`."""
+
+        from .instance import verify_instance
+
+        return verify_instance(self, instance, derive_missing=derive_missing)
+
+    def validate(self, instance: Any, *, derive_missing: bool = True):
+        """Check an instance and raise :class:`VerificationError` on failure."""
+
+        report = self.verify(instance, derive_missing=derive_missing)
+        report.raise_if_failed()
+        return report.model if report.model is not None else report.values
+
+    def derive(self, **values: Any):
+        """Fill every currently-ready 0-DoF field and return the resulting dict."""
+
+        from .instance import fill_derived
+
+        filled, _unresolved, _derived = fill_derived(self.spec, values)
+        return filled
+
+    def describe(self):
+        from .instance import describe_spec
+
+        return describe_spec(self.spec)
+
+    @property
+    def digest(self):
+        from .serde import spec_digest
+
+        return spec_digest(self.spec)
+
+    @property
+    def containers(self):
+        return dict(self.spec.containers)
+
 
 def verified_schema(
     func=None,
@@ -122,65 +161,70 @@ def forall(iterable, predicate):
     return ("forall", iterable, predicate)
 
 
-def sum_(x):  # avoid shadowing builtin? expose as sum
-    if hasattr(x, "__iter__"):
-        try:
-            return sum(x)
-        except Exception:
-            return x
-    return x
+def veritas_sum(*args):
+    """``vt.sum``: identity for a single iterable, builtin addition for varargs."""
 
-
-# We'll expose `sum` name below by aliasing to a wrapper that doesn't break builtin usage in this module.
-def _veritas_sum(*args):
     if len(args) == 1:
-        x = args[0]
-        if hasattr(x, "__iter__") and not isinstance(x, (str, bytes, dict)):
+        value = args[0]
+        if isinstance(value, dict):
             try:
-                return sum(x)
+                return builtins.sum(value.values())
             except Exception:
-                return x
-        return x
-    return sum(args)
+                return value
+        if hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
+            try:
+                return builtins.sum(value)
+            except Exception:
+                return value
+        return value
+    return builtins.sum(args)
 
 
 def dot(w, r):
+    """``vt.dot``: dict·dict, dict·sequence, or sequence·sequence."""
+
     try:
-        if isinstance(w, dict) and isinstance(r, dict):
-            return sum(w.get(k, 0) * r.get(k, 0) for k in set(w) | set(r))
-        # if w/r are vector-like
-        return sum(a * b for a, b in zip(w, r))
+        if isinstance(w, dict):
+            if isinstance(r, dict):
+                return builtins.sum(w.get(k, 0.0) * r.get(k, 0.0) for k in set(w) | set(r))
+            return builtins.sum(value * other for value, other in zip(w.values(), r))
+        if isinstance(r, dict):
+            return builtins.sum(value * r.get(k, 0.0) for k, value in zip(r.keys(), w))
+        return builtins.sum(a * b for a, b in zip(w, r))
     except Exception:
         return None
 
 
 def quad_form(w, cov):
-    # runtime helper: compute w^T cov w
+    """``vt.quad_form``: evaluate wᵀΣw, symmetrizing a triangular covariance map."""
+
     try:
         if isinstance(w, dict):
-            keys = list(w.keys())
-            vec = [w[k] for k in keys]
+            labels = list(w.keys())
+            vec = [w[k] for k in labels]
         else:
             vec = list(w)
-            keys = None
+            labels = None
         if isinstance(cov, dict):
-            # cov keys may be tuples
+            if labels is None:
+                labels = sorted({k[0] if isinstance(k, tuple) else k for k in cov})
             n = len(vec)
-            # build matrix
-            if keys is None:
-                keys = list(range(n))
-            mat = [[0.0] * n for _ in range(n)]
-            for (a, b), v in cov.items():
-                i = keys.index(a) if a in keys else None
-                j = keys.index(b) if b in keys else None
-                if i is not None and j is not None:
-                    mat[i][j] = float(v)
+            matrix = [[0.0] * n for _ in range(n)]
+            for key, value in cov.items():
+                a, b = key if isinstance(key, tuple) else (key, key)
+                if a not in labels or b not in labels:
+                    continue
+                i, j = labels.index(a), labels.index(b)
+                matrix[i][j] = float(value)
+                if i != j:
+                    matrix[j][i] = float(value)
             total = 0.0
             for i in range(n):
                 for j in range(n):
-                    total += vec[i] * mat[i][j] * vec[j]
+                    total += vec[i] * matrix[i][j] * vec[j]
             return total
         import numpy as np
+
         arr = np.array(cov, dtype=float)
         vec_arr = np.array(vec, dtype=float)
         return float(vec_arr @ arr @ vec_arr)
@@ -191,6 +235,7 @@ def quad_form(w, cov):
 def sqrt(x):
     try:
         import math
+
         return math.sqrt(x)
     except Exception:
         try:
@@ -206,10 +251,8 @@ def keys_subset(d, allowed):
         return None
 
 
-# Expose `sum` as veritas.sum (shadowing builtin only in this module namespace)
-sum = _veritas_sum
-# keep builtin accessible
-_builtin_sum = __builtins__["sum"] if isinstance(__builtins__, dict) else __builtins__.sum
+# Expose `sum` under the documented ``vt.sum`` name.
+sum = veritas_sum
 # Export aliases
 __all__ = [
     "verified_schema",

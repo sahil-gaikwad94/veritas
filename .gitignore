@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 *.pyo
 .veritas/
+.venv/
+.pytest_cache/
+traces/
