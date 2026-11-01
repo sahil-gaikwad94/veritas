@@ -82,7 +82,7 @@ pass:
 * Packaging is pure-Python setuptools with a `py.typed` marker; wheel and editable installs
   are smoke-tested. CI runs ruff, pytest, and wheel build on Python 3.11/3.12.
 
-Validation: `ruff check python tests` clean; `pytest tests/ -q` → **158 passed**; wheel
+Validation: `ruff check python tests` clean; `pytest tests/ -q` → **159 passed**; wheel
 build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
 
 ### Remaining known limits
@@ -94,3 +94,12 @@ build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0
   authoritative for quadratic constraints.
 * Certificates are recheckable witness artifacts, not signed proofs; non-portable Python
   validators require the original trusted schema.
+
+
+### CI dependency regression (PR #3)
+
+The first CI run exposed an unused NumPy import in the Cholesky compiler test and a
+matrix-input `vt.quad_form` path that silently required NumPy. The test now checks the
+pure-Python factor directly (`L Lᵀ = Σ`), matrix quadratic forms use a dependency-free
+path, and a regression forces NumPy imports to fail. The core CI environment deliberately
+installs only `dev,z3` so this contract remains tested.

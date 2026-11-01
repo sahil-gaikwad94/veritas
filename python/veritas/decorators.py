@@ -246,11 +246,16 @@ def quad_form(w, cov):
                 for j in range(n):
                     total += vec[i] * matrix[i][j] * vec[j]
             return total
-        import numpy as np
-
-        arr = np.array(cov, dtype=float)
-        vec_arr = np.array(vec, dtype=float)
-        return float(vec_arr @ arr @ vec_arr)
+        # Matrix inputs use the same dependency-free reference path as mappings.
+        matrix = [[float(value) for value in row] for row in cov]
+        vector = [float(value) for value in vec]
+        n = len(vector)
+        if len(matrix) != n or any(len(row) != n for row in matrix):
+            return None
+        return float(builtins.sum(
+            vector[i] * matrix[i][j] * vector[j]
+            for i in range(n) for j in range(n)
+        ))
     except Exception:
         return None
 

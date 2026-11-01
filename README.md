@@ -212,7 +212,7 @@ state.before_tool_call("transfer", {"amount": 10})
 | `code` | Scope-aware undefined-identifier detection, literal division by zero, literal index bounds, syntax errors |
 
 These are deterministic reference implementations with no mandatory NumPy/z3/SymPy
-dependency. Optional NumPy accelerates interval work when available.
+dependency. The core DSL and numerical helpers use pure-Python reference paths.
 
 ---
 
@@ -241,7 +241,7 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **158 tests passing** (compiler, preflight, instance verification, JSON PDA,
+Current status: **159 tests passing** (compiler, preflight, instance verification, JSON PDA,
 token healing, decode engine, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end).
 
 Useful focused suites:

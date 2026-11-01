@@ -171,3 +171,17 @@ def test_synth_sanitizes_identifiers_and_is_deterministic():
     assert "bad_name" in source
     assert "field_class" in source
     assert synth_schema(samples, name="Demo") == source
+
+
+def test_quad_form_matrix_path_does_not_require_numpy(monkeypatch):
+    import sys
+
+    # Match the core CI extra set: importing NumPy must fail on this path.
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    matrix = [
+        [0.048, 0.031, 0.042],
+        [0.031, 0.039, 0.036],
+        [0.042, 0.036, 0.095],
+    ]
+    assert vt.quad_form([0.4, 0.35, 0.25], matrix) == pytest.approx(0.041775)
+    assert vt.quad_form([1.0, 2.0], [[1.0, 0.0]]) is None
