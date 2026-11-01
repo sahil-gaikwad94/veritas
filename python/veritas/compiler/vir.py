@@ -1,27 +1,35 @@
-"""Veritas Intermediate Representation (VIR) for Phase 1 (Python mirror of Rust vir.rs)."""
+"""Versioned, data-only intermediate representation.
 
+VIR never contains executable Python.  Anything the compiler cannot represent must be
+rejected at the authoring boundary rather than lowered to a vacuous expression.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-
-
-VarId = int
-ClauseId = int
+from typing import Any
 
 
 @dataclass
 class VirType:
     kind: str = "any"
-    min: Optional[float] = None
-    max: Optional[float] = None
-    tol: float = 1e-6
-    width: Optional[int] = None
-    universe: Optional[List[str]] = None
+    min: float | None = None
+    max: float | None = None
+    tol: float = 0.0
+    width: int | None = None
+    universe: list[Any] | None = None
     min_len: int = 0
     max_len: int = 0
     val_min: float = float("-inf")
     val_max: float = float("inf")
+    nullable: bool = False
+    min_exclusive: bool = False
+    max_exclusive: bool = False
+    item_type: VirType | None = None
+    properties: dict[str, VirType] = field(default_factory=dict)
+    required: list[str] = field(default_factory=list)
+    additional_properties: bool = True
+    model_name: str | None = None
+    container_kind: str = "dict"
 
     @classmethod
     def real(cls, min=None, max=None, tol=1e-6):
@@ -36,73 +44,68 @@ class VirType:
         return cls(kind="bool")
 
     @classmethod
-    def dynamic_map(cls, allowed_keys=None, min_len=0, max_len=0, val_min=float("-inf"), val_max=float("inf")):
-        return cls(kind="dynamic_map", universe=allowed_keys, min_len=min_len, max_len=max_len, val_min=val_min, val_max=val_max)
+    def dynamic_map(cls, allowed_keys=None, min_len=0, max_len=0,
+                    val_min=float("-inf"), val_max=float("inf")):
+        return cls(kind="dynamic_map", universe=allowed_keys, min_len=min_len,
+                   max_len=max_len, val_min=val_min, val_max=val_max)
+
+    def accepts_number(self, value: float) -> bool:
+        if self.min is not None and (value <= self.min if self.min_exclusive else value < self.min):
+            return False
+        if self.max is not None and (value >= self.max if self.max_exclusive else value > self.max):
+            return False
+        return True
 
 
 @dataclass
 class VirExpr:
     kind: str = "expr"
-    var_id: Optional[int] = None
-    name: Optional[str] = None
+    var_id: int | None = None
+    name: str | None = None
     value: Any = None
-    op: Optional[str] = None
-    args: List["VirExpr"] = field(default_factory=list)
-    lhs: Optional["VirExpr"] = None
-    rhs: Optional["VirExpr"] = None
+    op: str | None = None
+    args: list[VirExpr] = field(default_factory=list)
+    lhs: VirExpr | None = None
+    rhs: VirExpr | None = None
     tol: float = 1e-6
     iterable: Any = None
-    predicate: Optional["VirExpr"] = None
-    # dynamic containers
-    container_id: Optional[int] = None
-    target_sum: Optional[float] = None
+    predicate: VirExpr | None = None
+    container_id: int | None = None
+    target_sum: float | None = None
     elem_min: float = 0.0
     elem_max: float = 0.0
     min_remaining: int = 0
     max_remaining: int = 0
-    # quad form
-    weights_vars: List[int] = field(default_factory=list)
-    cholesky_l: List[List[float]] = field(default_factory=list)
-    # soft preference
+    weights_vars: list[int] = field(default_factory=list)
+    cholesky_l: list[list[float]] = field(default_factory=list)
     weight: float = 1.0
     tag: str = ""
 
-    def collect_var_ids(self) -> List[int]:
-        out: List[int] = []
-        if self.kind == "var" and self.var_id is not None:
-            out.append(self.var_id)
-        if self.container_id is not None:
-            out.append(self.container_id)
-        if self.lhs is not None:
-            out.extend(self.lhs.collect_var_ids())
-        if self.rhs is not None:
-            out.extend(self.rhs.collect_var_ids())
-        for a in self.args:
-            out.extend(a.collect_var_ids())
-        if self.predicate is not None:
-            out.extend(self.predicate.collect_var_ids())
-        if hasattr(self.iterable, "collect_var_ids"):
-            out.extend(self.iterable.collect_var_ids())
-        # deduplicate while preserving order
+    def collect_var_ids(self) -> list[int]:
+        out: list[int] = []
         seen = set()
-        uniq = []
-        for v in out:
-            if v not in seen:
-                seen.add(v)
-                uniq.append(v)
-        return uniq
+        def visit(node):
+            if node is None or not hasattr(node, "kind"):
+                return
+            if node.kind == "var" and node.var_id is not None and node.var_id not in seen:
+                seen.add(node.var_id)
+                out.append(node.var_id)
+            for child in (node.lhs, node.rhs, node.predicate, node.iterable, *node.args):
+                visit(child)
+        visit(self)
+        return out
 
-    def collect_var_names(self, id_to_name: Dict[int, str]) -> List[str]:
+    def collect_var_names(self, id_to_name: dict[int, str]) -> list[str]:
         return [id_to_name[v] for v in self.collect_var_ids() if v in id_to_name]
 
 
 @dataclass
 class ZeroDofRule:
     target_var: Any = None
-    target_json_key: Optional[str] = None
-    input_vars: List[Any] = field(default_factory=list)
-    rhs_expr: Optional[VirExpr] = None
-    rhs_eval: Optional[Any] = None
+    target_json_key: str | None = None
+    input_vars: list[Any] = field(default_factory=list)
+    rhs_expr: VirExpr | None = None
+    rhs_eval: Any | None = None
     precision_digits: int = 6
 
 
@@ -111,107 +114,113 @@ class SoftPreference:
     id: int
     tag: str = ""
     weight: float = 1.0
-    expr: Optional[VirExpr] = None
+    expr: VirExpr | None = None
 
 
 @dataclass
 class ContainerInfo:
-    """Static facts about a dynamic container (``dict`` / ``list``) field.
-
-    The compiler infers these from ``vt.keys_subset`` and ``vt.forall`` so the
-    pre-flight gate and the decode engine can apply AGDecode-style residual
-    reasoning instead of treating the container as an opaque blob.
-    """
-
     var_id: int
     name: str = ""
-    universe: Optional[List[str]] = None
+    universe: list[str] | None = None
     min_len: int = 0
-    max_len: Optional[int] = None
+    max_len: int | None = None
     elem_min: float = float("-inf")
     elem_max: float = float("inf")
-    target_sum: Optional[float] = None
+    target_sum: float | None = None
     sum_tol: float = 1e-6
+    sum_op: str = "eq"
+    container_kind: str = "dict"
 
-    def cardinality_bounds(self) -> tuple:
+    def cardinality_bounds(self):
         lo = max(0, self.min_len)
-        hi = self.max_len if self.max_len is not None else (len(self.universe) if self.universe else None)
+        hi = self.max_len
+        if self.container_kind == "dict" and self.universe is not None:
+            hi = len(self.universe) if hi is None else min(hi, len(self.universe))
         return lo, hi
 
     def residual_feasible(self, current_sum: float, emitted: int) -> bool:
-        """AGDecode residual lookahead in closed form.
-
-        Is there a completion length ``m`` such that the remaining target sum can be
-        produced by ``m`` elements each in ``[elem_min, elem_max]``?
-        """
-
         if self.target_sum is None:
             return True
         lo_len, hi_len = self.cardinality_bounds()
+        remaining = self.target_sum - current_sum
+        m_min = max(0, lo_len - emitted)
         if hi_len is None:
-            # Unbounded cardinality: feasibility only needs a reachable residual sign.
-            remaining = self.target_sum - current_sum
             if self.elem_min <= 0 <= self.elem_max:
                 return True
-            return (remaining >= 0) == (self.elem_min > 0)
-        m_min = max(0, lo_len - emitted)
+            if self.elem_min > 0:
+                return remaining >= m_min * self.elem_min - self.sum_tol
+            return remaining <= m_min * self.elem_max + self.sum_tol
         m_max = hi_len - emitted
-        if m_max < 0:
+        if m_max < m_min:
             return False
-        remaining = self.target_sum - current_sum
-        for m in range(m_min, m_max + 1):
-            if m * self.elem_min - 1e-12 <= remaining <= m * self.elem_max + 1e-12:
-                return True
-        return False
+        # The union over integer suffix lengths is an interval here because consecutive
+        # lengths have overlapping reachable sums when zero lies in the element domain;
+        # otherwise all element signs agree and the extreme cardinalities are sufficient.
+        low = min(m_min * self.elem_min, m_max * self.elem_min)
+        high = max(m_min * self.elem_max, m_max * self.elem_max)
+        if self.elem_min <= 0 <= self.elem_max:
+            low = m_max * self.elem_min
+            high = m_max * self.elem_max
+        return low - self.sum_tol <= remaining <= high + self.sum_tol
 
-    def residual_interval(self, current_sum: float, emitted: int) -> tuple:
-        """Bounds on the next element implied by the residual accumulator."""
-
+    def residual_interval(self, current_sum: float, emitted: int):
+        if self.target_sum is None or self.sum_op != "eq":
+            return self.elem_min, self.elem_max
         lo_len, hi_len = self.cardinality_bounds()
-        if self.target_sum is None or hi_len is None:
-            return (self.elem_min, self.elem_max)
-        m_max = max(0, hi_len - emitted)
-        m_min = max(0, lo_len - emitted)
+        if hi_len is None or hi_len <= emitted:
+            return (0.0, 0.0) if hi_len == emitted else (self.elem_min, self.elem_max)
+        # This is the NEXT element: subtract one before computing suffix cardinalities.
+        after = emitted + 1
+        m_min = max(0, lo_len - after)
+        m_max = hi_len - after
         remaining = self.target_sum - current_sum
-        # next element x must leave room for [m_min-1, m_max-1] successors
-        lo = self.elem_min if m_max <= 1 else max(self.elem_min, remaining - (m_max - 1) * self.elem_max)
-        hi = self.elem_max if m_min <= 1 else min(self.elem_max, remaining - (m_min - 1) * self.elem_min)
-        return (lo, hi)
+        tail_lo = min(m_min * self.elem_min, m_max * self.elem_min)
+        tail_hi = max(m_min * self.elem_max, m_max * self.elem_max)
+        if self.elem_min <= 0 <= self.elem_max:
+            tail_lo, tail_hi = m_max * self.elem_min, m_max * self.elem_max
+        return (max(self.elem_min, remaining - tail_hi),
+                min(self.elem_max, remaining - tail_lo))
 
 
 @dataclass
 class VirSpec:
     model: Any = None
-    variables: Dict[int, Dict[str, Any]] = field(default_factory=dict)
-    id_to_name: Dict[int, str] = field(default_factory=dict)
-    name_to_id: Dict[str, int] = field(default_factory=dict)
-    field_order: List[str] = field(default_factory=list)
-    requires: List[VirExpr] = field(default_factory=list)
-    derives: List[VirExpr] = field(default_factory=list)
-    prefers: List[VirExpr] = field(default_factory=list)
-    zero_dof_rules: List[ZeroDofRule] = field(default_factory=list)
-    soft_preferences: List[SoftPreference] = field(default_factory=list)
-    containers: Dict[int, ContainerInfo] = field(default_factory=dict)
-    config: Dict[str, Any] = field(default_factory=dict)
+    variables: dict[int, dict[str, Any]] = field(default_factory=dict)
+    id_to_name: dict[int, str] = field(default_factory=dict)
+    name_to_id: dict[str, int] = field(default_factory=dict)
+    field_order: list[str] = field(default_factory=list)
+    requires: list[VirExpr] = field(default_factory=list)
+    derives: list[VirExpr] = field(default_factory=list)
+    prefers: list[VirExpr] = field(default_factory=list)
+    zero_dof_rules: list[ZeroDofRule] = field(default_factory=list)
+    soft_preferences: list[SoftPreference] = field(default_factory=list)
+    containers: dict[int, ContainerInfo] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
+    model_schema: dict[str, Any] | None = None
+    field_aliases: dict[str, str] = field(default_factory=dict)
+    portable_model: bool = True
+    compiler_diagnostics: list[str] = field(default_factory=list)
 
-    def all_constraints(self) -> List[VirExpr]:
+    def all_constraints(self):
         return list(self.requires) + list(self.derives)
 
-    def derived_names(self) -> List[str]:
-        return [r.target_json_key for r in self.zero_dof_rules if r.target_json_key]
+    def derived_names(self):
+        return list(dict.fromkeys(r.target_json_key for r in self.zero_dof_rules if r.target_json_key))
 
-    def is_derived(self, name: str) -> bool:
+    def is_derived(self, name):
         return name in self.derived_names()
 
 
 @dataclass
 class PreflightResult:
-    status: str = "SAT"
-    conflicts: List[int] = field(default_factory=list)
-    constraint_indices: List[int] = field(default_factory=list)
-    relaxation: Optional[Dict[str, Any]] = None
-    domains: Dict[int, tuple] = field(default_factory=dict)
+    status: str = "UNKNOWN"
+    conflicts: list[int] = field(default_factory=list)
+    constraint_indices: list[int] = field(default_factory=list)
+    relaxation: dict[str, Any] | None = None
+    domains: dict[int, tuple] = field(default_factory=dict)
+    witness: dict[str, Any] | None = None
+    details: list[str] = field(default_factory=list)
 
     @property
-    def is_sat(self) -> bool:
+    def is_sat(self):
         return self.status == "SAT"

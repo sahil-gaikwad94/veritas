@@ -11,25 +11,25 @@ across verification, decoding and proof checking.
 
 from __future__ import annotations
 
-import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
-from .evaluate import eval_expr
+from .evaluate import MISSING, eval_expr
 from .json_pda import render_continuation
 
 
 @dataclass
 class ZeroDofRule:
     target_var: Any
-    target_json_key: Optional[str] = None
-    input_vars: List[Any] = field(default_factory=list)
-    rhs_eval: Optional[Callable[[Dict[Any, Any]], Any]] = None
+    target_json_key: str | None = None
+    input_vars: list[Any] = field(default_factory=list)
+    rhs_eval: Callable[[dict[Any, Any]], Any] | None = None
     rhs_expr: Any = None
     precision_digits: int = 6
 
 
-def _lookup(values: Mapping[Any, Any], key: Any, aliases: Mapping[Any, Any]) -> Tuple[bool, Any]:
+def _lookup(values: Mapping[Any, Any], key: Any, aliases: Mapping[Any, Any]) -> tuple[bool, Any]:
     if key in values:
         return True, values[key]
     alias = aliases.get(key)
@@ -39,24 +39,24 @@ def _lookup(values: Mapping[Any, Any], key: Any, aliases: Mapping[Any, Any]) -> 
 
 
 class ZeroDofEngine:
-    def __init__(self, rules: Optional[List[ZeroDofRule]] = None):
-        self.rules: List[ZeroDofRule] = list(rules or [])
-        self.cache: Dict[Any, Any] = {}
+    def __init__(self, rules: list[ZeroDofRule] | None = None):
+        self.rules: list[ZeroDofRule] = list(rules or [])
+        self.cache: dict[Any, Any] = {}
         # Optional id/name aliasing used when rules come from a compiled spec.
-        self._aliases: Dict[Any, Any] = {}
+        self._aliases: dict[Any, Any] = {}
         self.last_splice: str = ""
-        self.jump_forward_fields: List[str] = []
+        self.jump_forward_fields: list[str] = []
 
     # -- construction ----------------------------------------------------
     @classmethod
-    def from_spec(cls, spec: Any) -> "ZeroDofEngine":
+    def from_spec(cls, spec: Any) -> ZeroDofEngine:
         engine = cls()
-        aliases: Dict[Any, Any] = {}
+        aliases: dict[Any, Any] = {}
         for rule in getattr(spec, "zero_dof_rules", []) or []:
             target = rule.target_json_key
             if target is None and isinstance(rule.target_var, int):
                 target = spec.id_to_name.get(rule.target_var)
-            inputs: List[Any] = []
+            inputs: list[Any] = []
             for item in rule.input_vars:
                 if isinstance(item, int):
                     name = spec.id_to_name.get(item)
@@ -89,7 +89,7 @@ class ZeroDofEngine:
         self.rules.append(rule)
 
     # -- readiness -------------------------------------------------------
-    def _rule_for(self, target_var: Any) -> Optional[ZeroDofRule]:
+    def _rule_for(self, target_var: Any) -> ZeroDofRule | None:
         for rule in self.rules:
             if rule.target_var == target_var or rule.target_json_key == target_var:
                 return rule
@@ -101,8 +101,8 @@ class ZeroDofEngine:
             return False
         return all(_lookup(values, dep, self._aliases)[0] for dep in rule.input_vars)
 
-    def pending(self, values: Mapping[Any, Any]) -> List[ZeroDofRule]:
-        out: List[ZeroDofRule] = []
+    def pending(self, values: Mapping[Any, Any]) -> list[ZeroDofRule]:
+        out: list[ZeroDofRule] = []
         for rule in self.rules:
             target = rule.target_json_key if rule.target_json_key is not None else rule.target_var
             if _lookup(values, target, self._aliases)[0]:
@@ -130,7 +130,7 @@ class ZeroDofEngine:
             if getattr(expr, "kind", None) == "compare":
                 expr = expr.rhs if expr.rhs is not None else expr.lhs
             value = eval_expr(expr, values)
-        if value is None:
+        if value is None or value is MISSING:
             return None
         precision = max(0, int(getattr(rule, "precision_digits", 6) or 0))
         if isinstance(value, float) and precision:
@@ -138,7 +138,7 @@ class ZeroDofEngine:
         self.cache[rule.target_json_key or rule.target_var] = value
         return value
 
-    def evaluate_cascade(self, values: Mapping[Any, Any]) -> Dict[Any, Any]:
+    def evaluate_cascade(self, values: Mapping[Any, Any]) -> dict[Any, Any]:
         result = dict(values)
         changed = True
         passes = 0
@@ -159,10 +159,10 @@ class ZeroDofEngine:
                 changed = True
         return result
 
-    def compute_ready(self, values: Mapping[Any, Any]) -> Dict[str, Any]:
+    def compute_ready(self, values: Mapping[Any, Any]) -> dict[str, Any]:
         """Evaluate every currently-ready rule; return only newly computed fields."""
 
-        computed: Dict[str, Any] = {}
+        computed: dict[str, Any] = {}
         result = dict(values)
         for _ in range(100):
             progress = False
@@ -192,9 +192,9 @@ class ZeroDofEngine:
     def splice_json(
         self,
         values: Mapping[Any, Any],
-        keys: Optional[Sequence[str]] = None,
-        precision: Optional[Mapping[str, int]] = None,
-    ) -> Tuple[str, Dict[str, Any]]:
+        keys: Sequence[str] | None = None,
+        precision: Mapping[str, int] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         """Return the Jump-Forward continuation text plus the fields it computed."""
 
         computed = self.compute_ready(values)

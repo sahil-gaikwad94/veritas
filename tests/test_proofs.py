@@ -10,7 +10,6 @@ import pytest
 from pydantic import BaseModel
 
 import veritas as vt
-
 from veritas.proof.certificate import (
     ProofCertificate,
     build_certificate,
@@ -71,10 +70,10 @@ def test_tampered_spec_payload_is_rejected():
     requires = data["spec"]["requires"]
     data["spec"]["requires"] = requires[:-1]
     forged = ProofCertificate.from_dict(data)
-    forged.seal()
-    verification = verify_certificate(forged)
+    forged.seal()  # re-sealing recomputes unkeyed hashes; it is not authentication
+    verification = verify_certificate(forged, expected_spec=pair)
     assert not verification.ok
-    assert any(check.name == "spec_sha256" and not check.ok for check in verification.checks)
+    assert any(check.name == "expected_spec" and not check.ok for check in verification.checks)
 
 
 def test_certificate_bound_to_expected_spec():

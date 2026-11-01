@@ -10,12 +10,14 @@ examples do not support.
 from __future__ import annotations
 
 import json
+import keyword
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 
-def _load_samples(samples: Any) -> List[Dict[str, Any]]:
+def _load_samples(samples: Any) -> list[dict[str, Any]]:
     if samples is None:
         raise ValueError("synth requires at least one example")
     if isinstance(samples, (str, Path)):
@@ -27,7 +29,7 @@ def _load_samples(samples: Any) -> List[Dict[str, Any]]:
         payload = [payload]
     if not isinstance(payload, list) or not payload:
         raise ValueError("examples must be a JSON object or a non-empty list of objects")
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for item in payload:
         if not isinstance(item, Mapping):
             raise ValueError("every example must be a JSON object")
@@ -48,8 +50,8 @@ def _infer_type(values: Sequence[Any]) -> str:
     if all(isinstance(v, str) for v in present):
         return "str"
     if all(isinstance(v, Mapping) for v in present):
-        keys: List[str] = []
-        nested: List[Any] = []
+        keys: list[str] = []
+        nested: list[Any] = []
         for mapping in present:
             for key, value in mapping.items():
                 if str(key) not in keys:
@@ -100,7 +102,24 @@ def _snake(name: str) -> str:
         cleaned = "synthesized"
     if cleaned[0].isdigit():
         cleaned = "m_" + cleaned
+    if keyword.iskeyword(cleaned):
+        cleaned = "field_" + cleaned
     return cleaned
+
+
+def _identifiers(fields: Sequence[str]) -> dict[str, str]:
+    used: set[str] = set()
+    out: dict[str, str] = {}
+    for field in fields:
+        base = _snake(field)
+        ident = base
+        counter = 2
+        while ident in used:
+            ident = f"{base}_{counter}"
+            counter += 1
+        used.add(ident)
+        out[field] = ident
+    return out
 
 
 def _pascal(name: str) -> str:
@@ -113,26 +132,27 @@ def synth_schema(
     *,
     name: str = "SynthesizedModel",
     from_json: Any = None,
-    output: Optional[str] = None,
+    output: str | None = None,
     require_ranges: bool = True,
 ) -> str:
     """Return a Python module (source text) inferred from example objects."""
 
     examples = _load_samples(from_json if from_json is not None else samples)
-    fields: List[str] = []
+    fields: list[str] = []
     for example in examples:
         for key in example:
             if str(key) not in fields:
                 fields.append(str(key))
 
-    columns: Dict[str, List[Any]] = {field: [ex.get(field) for ex in examples] for field in fields}
+    columns: dict[str, list[Any]] = {field: [ex.get(field) for ex in examples] for field in fields}
     annotations = {field: _field_annotation(field, columns[field], {}) for field in fields}
+    identifiers = _identifiers(fields)
     class_name = _pascal(name)
     function_name = _snake(name)
     if function_name in {"model", "schema", "base_model"}:
         function_name = function_name + "_spec"
 
-    lines: List[str] = [
+    lines: list[str] = [
         '"""Synthesized by veritas from concrete examples. Review before production use."""',
         "",
         "from __future__ import annotations",
@@ -147,14 +167,17 @@ def synth_schema(
     ]
     for field in fields:
         annotation = annotations[field]
+        ident = identifiers[field]
         default = _default_literal(annotation, columns[field][0])
-        if default.startswith("Field("):
-            lines.append(f"    {field}: {annotation} = {default}")
-        else:
-            lines.append(f"    {field}: {annotation} = {default}")
+        if ident != field:
+            if default.startswith("Field("):
+                default = default[:-1] + f", alias={field!r})"
+            else:
+                default = f"Field({default}, alias={field!r})"
+        lines.append(f"    {ident}: {annotation} = {default}")
     lines += ["", "", "@vt.verified_schema()", f"def {function_name}(p: {class_name}):"]
 
-    body: List[str] = []
+    body: list[str] = []
     for field in fields:
         values = [v for v in columns[field] if v is not None]
         annotation = annotations[field]
@@ -163,16 +186,16 @@ def synth_schema(
             if lo == hi:
                 continue
             if annotation == "int":
-                body.append(f"    vt.require(({lo} <= p.{field}) & (p.{field} <= {hi}))")
+                body.append(f"    vt.require(({lo} <= p.{identifiers[field]}) & (p.{identifiers[field]} <= {hi}))")
             else:
                 padding = (hi - lo) * 0.1 or abs(hi) * 0.01 or 0.01
                 body.append(
-                    f"    vt.require(({lo - padding:.12g} <= p.{field}) & "
-                    f"(p.{field} <= {hi + padding:.12g}))"
+                    f"    vt.require(({lo - padding:.12g} <= p.{identifiers[field]}) & "
+                    f"(p.{identifiers[field]} <= {hi + padding:.12g}))"
                 )
         if annotation.startswith("dict"):
-            universe: List[str] = []
-            numeric: List[float] = []
+            universe: list[str] = []
+            numeric: list[float] = []
             for mapping in (ex.get(field) for ex in examples):
                 if isinstance(mapping, Mapping):
                     for key, value in mapping.items():
@@ -181,13 +204,13 @@ def synth_schema(
                         if isinstance(value, (int, float)) and not isinstance(value, bool):
                             numeric.append(float(value))
             if universe:
-                body.append(f"    vt.require(vt.keys_subset(p.{field}, {set(universe)!r}))")
+                body.append(f"    vt.require(vt.keys_subset(p.{identifiers[field]}, {sorted(set(universe))!r}))")
             if require_ranges and len(numeric) >= 2 and len(universe) == len(set(universe)):
                 lo, hi = min(numeric), max(numeric)
                 if lo != hi:
                     padding = (hi - lo) * 0.1 or 0.01
                     body.append(
-                        f"    vt.require(vt.forall(p.{field}.values(), "
+                        f"    vt.require(vt.forall(p.{identifiers[field]}.values(), "
                         f"lambda v: ({lo - padding:.12g} <= v) & (v <= {hi + padding:.12g})))"
                     )
     if not body:

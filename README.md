@@ -18,16 +18,16 @@ whose crates are still scaffolding (see [Status and limits](#status-and-limits))
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -U pip pydantic pytest numpy
-export PYTHONPATH=python
+.venv/bin/pip install -e ".[dev]"
 
 .venv/bin/python -m pytest tests/ -q
-.venv/bin/python -m veritas --help
+.venv/bin/veritas --help
 ```
 
-The Python package is used directly from `python/` for development. `pyproject.toml` uses
-the Maturin build backend because the long-term design includes a native core; installing
-the package with `pip install -e .` therefore requires a Rust toolchain.
+The shipped engine is pure Python and installs with setuptools; no Rust toolchain is
+required. Optional extras are available: `.[z3]` for the SMT oracle, `.[cas]` for
+SymPy/NumPy, and `.[rl]` for HuggingFace dataset export. For source-tree development
+without installation, set `PYTHONPATH=python`.
 
 ### A schema that cannot lie
 
@@ -166,10 +166,16 @@ certificate.save("proof.json")
 assert vt.verify_proof("proof.json").ok
 ```
 
-A certificate embeds the versioned VIR, the witness, named constraints in SMT-LIB2 and
-SHA-256 hashes. Verification is offline and re-evaluates the constraints from the embedded
-spec; recomputing the certificate hash cannot hide an invalid witness. Tampering with the
-spec payload or witness is reported as a failed check rather than an exception.
+A certificate embeds the versioned VIR, the witness, an SMT-LIB2 rendering and SHA-256
+hashes. Verification is offline and re-evaluates the constraints from the embedded spec.
+The SMT export reports its coverage explicitly (`smt2_complete`, `smt2_omitted`); omitted
+constraints are still checked by the VIR evaluator.
+
+These hashes are **unkeyed integrity checks, not authentication**. Anyone can recompute
+them, so bind verification to a trusted spec with `vt.verify_proof(cert, expected_spec=...)`
+or sign the artifact in your application. Arbitrary Python/Pydantic validators are not
+portable; certificates for non-portable schemas require the original trusted schema to
+re-run those validators.
 
 ---
 
@@ -213,8 +219,10 @@ dependency. Optional NumPy accelerates interval work when available.
 ## Bridges
 
 - **HuggingFace / vLLM / SGLang / llama.cpp**: build an exact JSON token mask from the
-  tokenizer vocabulary and attach it as a logits processor; llama.cpp also exposes a GBNF
-  document. The processors accept lists, NumPy arrays and torch tensors.
+  tokenizer vocabulary and attach it as a logits processor. The processors accept lists,
+  NumPy arrays and torch tensors. llama.cpp hosts that only accept a grammar string get a
+  generic JSON GBNF; if a spec is supplied, that path fails closed rather than pretending
+  the generic grammar enforces the spec.
 - **Async stream proxy**: supervises raw text, SSE `data:` frames and OpenAI/Anthropic delta
   objects. It raises on malformed prefixes, incomplete termination and final spec violations,
   with an optional violation callback.
@@ -233,7 +241,7 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **122 tests passing** (compiler, preflight, instance verification, JSON PDA,
+Current status: **158 tests passing** (compiler, preflight, instance verification, JSON PDA,
 token healing, decode engine, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end).
 
 Useful focused suites:
@@ -252,11 +260,15 @@ Useful focused suites:
 - The **Python engine is the complete, tested product surface** in this repository.
 - The `crates/` Rust workspace is still scaffolding. No Rust toolchain (`cargo`/`rustc`) is
   available in this environment, so nothing in `crates/` was compiled or claimed as working.
-- The grammar tier recognizes **JSON**, not arbitrary context-free grammars. Token masking
+- The grammar tier recognizes **JSON**, not arbitrary context-free grammars. Schema-guided
+  masking supports a documented JSON Schema subset (objects/arrays/scalars, `anyOf`/`oneOf`,
+  local `$ref`, required/arity/range/enum); unsupported keywords fail loudly. Token masking
   is exact over a supplied vocabulary but is a Python reference implementation, not a SIMD
   kernel.
-- The certificate verifier is self-contained; the optional Z3 oracle and SymPy paths are not
-  exercised in this environment.
+- `require` comparisons are exact by default; pass `tol=` explicitly when an engineering
+  tolerance is intended. `derive` keeps a numeric equality tolerance by default.
+- The certificate verifier is self-contained. The optional Z3 oracle is exercised when
+  `z3-solver` is installed; SymPy/CAS paths remain optional.
 - GPU/runtime bridges are adapter-tested with fakes. They are not integration-tested against
   live HF/vLLM/SGLang/llama.cpp servers, and vendor APIs may need host-specific wiring.
 - `--from-doc` requires a model adapter and intentionally fails loudly instead of inventing a

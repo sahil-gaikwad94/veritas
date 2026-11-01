@@ -14,9 +14,9 @@ Everything is conservative by construction: when a form is not affine, extractio
 
 from __future__ import annotations
 
-import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 from .compiler.vir import VirExpr, VirSpec
 from .evaluate import as_number, expr_to_str
@@ -29,16 +29,16 @@ _AFFINE_OPS = ("add", "sub", "mul", "div", "neg")
 class LinearForm:
     """``sum(coeffs[v] * v) + const`` over scalar variables."""
 
-    coeffs: Dict[Any, float] = field(default_factory=dict)
+    coeffs: dict[Any, float] = field(default_factory=dict)
     const: float = 0.0
 
-    def scaled(self, factor: float) -> "LinearForm":
+    def scaled(self, factor: float) -> LinearForm:
         return LinearForm(
             coeffs={k: v * factor for k, v in self.coeffs.items()},
             const=self.const * factor,
         )
 
-    def plus(self, other: "LinearForm") -> "LinearForm":
+    def plus(self, other: LinearForm) -> LinearForm:
         coeffs = dict(self.coeffs)
         for key, value in other.coeffs.items():
             coeffs[key] = coeffs.get(key, 0.0) + value
@@ -48,9 +48,9 @@ class LinearForm:
     def is_constant(self, eps: float = 1e-15) -> bool:
         return all(abs(v) <= eps for v in self.coeffs.values())
 
-    def pretty(self, names: Optional[Mapping[int, str]] = None) -> str:
+    def pretty(self, names: Mapping[int, str] | None = None) -> str:
         names = names or {}
-        parts: List[str] = []
+        parts: list[str] = []
         for var, coeff in sorted(self.coeffs.items(), key=lambda kv: repr(kv[0])):
             label = names.get(var, str(var)) if isinstance(var, int) else str(var)
             parts.append(f"{coeff:+.6g}*{label}")
@@ -58,7 +58,7 @@ class LinearForm:
         return " ".join(parts)
 
 
-def linearize(expr: Optional[VirExpr]) -> Optional[LinearForm]:
+def linearize(expr: VirExpr | None) -> LinearForm | None:
     """Extract an affine form, or ``None`` when the expression is not affine."""
 
     if expr is None:
@@ -123,10 +123,10 @@ class Clause:
     source: str  # "require" | "derive"
     expr: VirExpr
     text: str
-    linear: Optional[LinearForm] = None
-    comparison: Optional[Tuple[str, float, float]] = None  # (op, rhs_const, tol)
+    linear: LinearForm | None = None
+    comparison: tuple[str, float, float] | None = None  # (op, rhs_const, tol)
 
-    def as_solver_constraint(self) -> Optional[Tuple[str, Dict[Any, float], float]]:
+    def as_solver_constraint(self) -> tuple[str, dict[Any, float], float] | None:
         """Return ``(op, coeffs, rhs)`` for the nano solver, or ``None``."""
 
         if self.comparison is None or self.linear is None:
@@ -136,8 +136,8 @@ class Clause:
         return op, dict(self.linear.coeffs), -self.linear.const + rhs
 
 
-def compile_clauses(spec: VirSpec) -> List[Clause]:
-    clauses: List[Clause] = []
+def compile_clauses(spec: VirSpec) -> list[Clause]:
+    clauses: list[Clause] = []
     tracker = 0
     for index, expr in enumerate(spec.requires):
         clause = _compile_one(tracker, index, "require", expr, spec)
@@ -165,11 +165,11 @@ def _compile_one(tracker: int, index: int, source: str, expr: VirExpr, spec: Vir
             difference = lhs.plus(right.scaled(-1.0))
             # Difference OP -0  <=>  sum(coeff) OP -const
             clause.linear = LinearForm(difference.coeffs, difference.const)
-            clause.comparison = (op, 0.0, float(getattr(expr, "tol", 1e-6) or 1e-6))
+            clause.comparison = (op, 0.0, float(getattr(expr, "tol", 0.0) or 0.0))
     return clause
 
 
-def simplify_clause(clause: Clause) -> Optional[Tuple[str, Dict[Any, float], float]]:
+def simplify_clause(clause: Clause) -> tuple[str, dict[Any, float], float] | None:
     """Normalize a clause into ``op, coeffs, rhs`` with a real tolerance on rhs."""
 
     if clause.comparison is None or clause.linear is None:
@@ -195,10 +195,10 @@ def simplify_clause(clause: Clause) -> Optional[Tuple[str, Dict[Any, float], flo
 # ---------------------------------------------------------------------------
 
 def interval_eval(
-    expr: Optional[VirExpr],
+    expr: VirExpr | None,
     domains: Mapping[Any, Interval],
-    spec: Optional[VirSpec] = None,
-) -> Optional[Interval]:
+    spec: VirSpec | None = None,
+) -> Interval | None:
     """Evaluate an expression with outward-rounded interval arithmetic."""
 
     if expr is None:
@@ -262,15 +262,15 @@ def interval_eval(
 
 
 def compare_interval(
-    expr: VirExpr, domains: Mapping[Any, Interval], spec: Optional[VirSpec] = None
-) -> Optional[bool]:
+    expr: VirExpr, domains: Mapping[Any, Interval], spec: VirSpec | None = None
+) -> bool | None:
     """Three-valued interval check: ``True`` (definitely), ``False`` (impossible), ``None``."""
 
     left = interval_eval(getattr(expr, "lhs", None), domains, spec)
     right = interval_eval(getattr(expr, "rhs", None), domains, spec)
     if left is None or right is None:
         return None
-    tol = float(getattr(expr, "tol", 1e-6) or 1e-6)
+    tol = float(getattr(expr, "tol", 0.0) or 0.0)
     op = getattr(expr, "op", "eq")
     if left.is_empty() or right.is_empty():
         return False if op != "ne" else True

@@ -5,8 +5,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import veritas as vt
 from pydantic import BaseModel, Field
+
+import veritas as vt
 
 
 class SimpleModel(BaseModel):
@@ -84,7 +85,6 @@ def test_preflight_unsat_simple():
         x: float = 0.0
 
     # infeasible bounds
-    spec_holder = {}
 
     class Infeasible(Exception):
         pass
@@ -127,7 +127,7 @@ def test_zero_dof_rules_present():
 
 def test_quad_form_cholesky():
     import numpy as np
-    L = np.linalg.cholesky(np.array([[0.048, 0.031, 0.042],
+    _L = np.linalg.cholesky(np.array([[0.048, 0.031, 0.042],
                                      [0.031, 0.039, 0.036],
                                      [0.042, 0.036, 0.095]]))
     # at least one rule with cholesky_l non-empty
@@ -135,7 +135,7 @@ def test_quad_form_cholesky():
     def vp(p: PortfolioAllocation):
         vt.derive(p.volatility == vt.sqrt(vt.quad_form(p.weights, COV_MATRIX)), tol=1e-5)
 
-    rule_exprs = [r.rhs_expr for r in vp.spec.zero_dof_rules]
+    _rule_exprs = [r.rhs_expr for r in vp.spec.zero_dof_rules]
     # find quad_form expr
     found = False
     for e in vp.spec.derives:

@@ -14,25 +14,19 @@ The public surface follows the product handbook:
 from __future__ import annotations
 
 import functools
-from typing import Any, Optional
+from typing import Any
 
 __version__ = "2.0.0"
 
 # --- authoring layer -------------------------------------------------------
-from .decorators import (
-    CircularDerivationError,
-    InfeasibleSpecError,
-    VerifiedSchema,
-    derive,
-    dot,
-    forall,
-    keys_subset,
-    prefer,
-    quad_form,
-    require,
-    sqrt,
-    sum,
-    verified_schema,
+from .cartridges.sec import WorldState
+
+# --- jump-forward / backtracking -----------------------------------------
+from .cdcl_jumpback import (
+    CdclJumpbackEngine,
+    ClauseCheckpoint,
+    ConflictBranchRecord,
+    TabuPrefixTrie,
 )
 from .compiler.analysis import analyze_containers, container_for_name
 from .compiler.ast_transpiler import AstTranspiler, TranspileError
@@ -49,12 +43,43 @@ from .compiler.vir import (
     ZeroDofRule,
 )
 
+# --- tier 0 / 1 / 2 engines ----------------------------------------------
+from .crane_mode import CraneModeController
+
+# --- decoding / proof -----------------------------------------------------
+from .decode import (
+    DeadEnd,
+    DecodeConfig,
+    DecodeEngine,
+    DecodeError,
+    DecodeResult,
+    DecodeTelemetry,
+    ModelProtocolError,
+    StepTrace,
+    VeritasSession,
+    generate,
+)
+from .decorators import (
+    CircularDerivationError,
+    VerifiedSchema,
+    derive,
+    dot,
+    forall,
+    keys_subset,
+    prefer,
+    quad_form,
+    require,
+    sqrt,
+    sum,
+    verified_schema,
+)
+
 # --- concrete verification ------------------------------------------------
 from .instance import (
-    ConstraintOutcome,
     FAIL,
     INCOMPLETE,
     PASS,
+    ConstraintOutcome,
     InstanceFormatError,
     VerificationError,
     VerificationReport,
@@ -66,10 +91,6 @@ from .instance import (
     verify_json,
     verify_values,
 )
-from .serde import digest_of_instance, spec_digest, spec_from_dict, spec_to_dict
-
-# --- tier 0 / 1 / 2 engines ----------------------------------------------
-from .crane_mode import CraneModeController
 from .interval import (
     AffineForm,
     Hc4AffineContractor,
@@ -86,39 +107,28 @@ from .json_pda import (
     render_object,
 )
 from .linear import Clause, LinearForm, compile_clauses, linearize
-from .pda import PushdownAutomaton
-from .shadow_ast import ShadowParser
-from .smt_bridge import SmtBridge, Z3SmtOracle
+
+# --- temporal logic / ecosystem ------------------------------------------
+from .ltlf import (
+    Always as Always,
+)
+from .ltlf import (
+    Event,
+    Formula,
+    Trace,
+    always,
+    at_most,
+    before,
+    eventually,
+    never,
+    occurred,
+    responds,
+)
+from .ltlf import (
+    evaluate as evaluate_formula,
+)
 from .nano_solver import SolverStatus, VeritasNanoSolver
-
-# --- jump-forward / backtracking -----------------------------------------
-from .cdcl_jumpback import (
-    CdclJumpbackEngine,
-    ClauseCheckpoint,
-    ConflictBranchRecord,
-    TabuPrefixTrie,
-)
-from .token_healer import (
-    ByteTokenizer,
-    JumpForwardPrefill,
-    TokenHealer,
-    TokenizerProtocol,
-)
-from .zero_dof import ZeroDofEngine, ZeroDofRule
-
-# --- decoding / proof -----------------------------------------------------
-from .decode import (
-    DeadEnd,
-    DecodeConfig,
-    DecodeEngine,
-    DecodeError,
-    DecodeResult,
-    DecodeTelemetry,
-    ModelProtocolError,
-    StepTrace,
-    VeritasSession,
-    generate,
-)
+from .pda import PushdownAutomaton
 from .proof.certificate import (
     CertificateCheck,
     CertificateError,
@@ -129,30 +139,22 @@ from .proof.certificate import (
     render_smt2,
     verify_certificate,
 )
-
-# --- temporal logic / ecosystem ------------------------------------------
-from .ltlf import (
-    Always,
-    Event,
-    Formula,
-    Trace,
-    always,
-    at_most,
-    before,
-    evaluate as evaluate_formula,
-    eventually,
-    never,
-    occurred,
-    responds,
-)
-from .cartridges.sec import WorldState
 from .rl.collector import (
     StepRecord,
     VeritasRLCollector,
     export_step_dpo,
 )
+from .serde import digest_of_instance, spec_digest, spec_from_dict, spec_to_dict
+from .shadow_ast import ShadowParser
+from .smt_bridge import SmtBridge, Z3SmtOracle
 from .testing import MockCharModel, RandomCharModel, StructuredReasoningModel, mock_model
-
+from .token_healer import (
+    ByteTokenizer,
+    JumpForwardPrefill,
+    TokenHealer,
+    TokenizerProtocol,
+)
+from .zero_dof import ZeroDofEngine
 
 # ---------------------------------------------------------------------------
 # top-level convenience
@@ -171,22 +173,37 @@ def verify_proof(certificate: Any, expected_spec: Any = None) -> CertificateVeri
 
 
 def _wrap_tool(function, spec, world_state, return_proof: bool):
-    @functools.wraps(function)
-    def wrapper(*args, **kwargs):
+    import inspect
+
+    def _finish(output):
+        if spec is None:
+            if world_state is not None:
+                world_state.record_call(function.__name__)
+            return output
+        report = verify_instance(spec, output)
+        wrapper.last_report = report
+        report.raise_if_failed()
+        if return_proof:
+            wrapper.last_proof = build_certificate(spec, report.values, metadata={"tool": function.__name__})
         if world_state is not None:
-            guard = getattr(world_state, "before_tool_call", None)
-            if callable(guard):
-                guard(function.__name__, kwargs)
-        output = function(*args, **kwargs)
-        if spec is not None:
-            report = verify_instance(spec, output)
-            wrapper.last_report = report
-            report.raise_if_failed()
-            if return_proof:
-                wrapper.last_proof = build_certificate(
-                    spec, report.values, metadata={"tool": function.__name__}
-                )
-        return output
+            world_state.record_call(function.__name__)
+        return report.model if report.model is not None else report.values
+
+    if inspect.iscoroutinefunction(function):
+        @functools.wraps(function)
+        async def async_wrapper(*args, **kwargs):
+            if world_state is not None:
+                world_state.before_tool_call(function.__name__, kwargs)
+            output = await function(*args, **kwargs)
+            return _finish(output)
+        wrapper = async_wrapper
+    else:
+        @functools.wraps(function)
+        def wrapper(*args, **kwargs):
+            if world_state is not None:
+                world_state.before_tool_call(function.__name__, kwargs)
+            output = function(*args, **kwargs)
+            return _finish(output)
 
     wrapper.spec = spec
     wrapper.last_report = None

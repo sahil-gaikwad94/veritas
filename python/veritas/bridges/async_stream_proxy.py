@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any, AsyncIterable, AsyncIterator, Callable, List, Optional
+from collections.abc import AsyncIterable, AsyncIterator, Callable
+from typing import Any
 
 from ..json_pda import JSONPushdownAutomaton
 
@@ -89,7 +90,7 @@ class AsyncStreamSupervisor:
         spec: Any = None,
         *,
         require_complete: bool = True,
-        on_violation: Optional[Callable[[StreamViolation], Any]] = None,
+        on_violation: Callable[[StreamViolation], Any] | None = None,
     ):
         self.spec = spec
         self.require_complete = require_complete
@@ -110,21 +111,30 @@ class AsyncStreamSupervisor:
                 pass
 
     async def supervise(self, stream: AsyncIterable[Any]) -> AsyncIterator[Any]:
+        """Supervise a stream, withholding the final chunk until verification passes.
+
+        Earlier chunks are released as soon as the next chunk proves the prefix is still
+        grammatical. The last chunk is buffered so a downstream consumer never receives
+        a complete-looking document that later fails instance verification.
+        """
         machine = JSONPushdownAutomaton()
-        pieces: List[str] = []
+        pieces: list[str] = []
+        pending: Any = None
+        have_pending = False
         async for chunk in stream:
             text = _extract_text(chunk)
             if text:
                 if not machine.feed(text):
-                    violation = StreamViolation(
-                        f"invalid JSON stream: {machine.error}", kind="grammar"
-                    )
+                    violation = StreamViolation(f"invalid JSON stream: {machine.error}", kind="grammar")
                     self._notify(violation)
                     raise violation
                 pieces.append(text)
-            yield chunk
+            if have_pending:
+                yield pending
+            pending = chunk
+            have_pending = True
         text = "".join(pieces)
-        if self.require_complete and not machine.accepts():
+        if self.require_complete and not (machine.finish() and machine.accepts()):
             violation = StreamViolation(
                 f"stream ended before JSON was complete: {machine.error or machine.state}",
                 kind="incomplete",
@@ -148,8 +158,10 @@ class AsyncStreamSupervisor:
                 )
                 self._notify(violation)
                 raise violation
+        if have_pending:
+            yield pending
 
-    async def collect(self, stream: AsyncIterable[Any]) -> List[Any]:
+    async def collect(self, stream: AsyncIterable[Any]) -> list[Any]:
         return [chunk async for chunk in self.supervise(stream)]
 
 

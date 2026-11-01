@@ -13,13 +13,14 @@ used by tests and by the reference decode engine.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class TokenizerProtocol(Protocol):
-    def encode(self, text: str) -> List[int]:  # pragma: no cover - protocol
+    def encode(self, text: str) -> list[int]:  # pragma: no cover - protocol
         ...
 
     def decode(self, ids: Sequence[int]) -> str:  # pragma: no cover - protocol
@@ -37,10 +38,11 @@ class JumpForwardPrefill:
     """
 
     backup_tokens: int = 0
-    new_token_ids: List[Any] = field(default_factory=list)
+    new_token_ids: list[Any] = field(default_factory=list)
     splice_string: str = ""
     healed_text: str = ""
     offset: int = 0
+    exact: bool = True
 
     @property
     def num_new_tokens(self) -> int:
@@ -56,7 +58,7 @@ class JumpForwardPrefill:
 class ByteTokenizer:
     """UTF-8 byte tokenizer: exact, dependency-free, and stable for healing tests."""
 
-    def encode(self, text: str) -> List[int]:
+    def encode(self, text: str) -> list[int]:
         return list(text.encode("utf-8"))
 
     def decode(self, ids: Sequence[int]) -> str:
@@ -65,7 +67,7 @@ class ByteTokenizer:
 
 
 class TokenHealer:
-    def __init__(self, tokenizer: Optional[Any] = None, max_backup: int = 4):
+    def __init__(self, tokenizer: Any | None = None, max_backup: int = 4):
         self.tokenizer = tokenizer
         self.max_backup = max(1, int(max_backup))
 
@@ -90,7 +92,7 @@ class TokenHealer:
         splice_string: str,
         tokenizer: Any = None,
         *,
-        max_backup: Optional[int] = None,
+        max_backup: int | None = None,
     ) -> JumpForwardPrefill:
         """Find the minimal token backup that makes ``splice_string`` tokenize exactly.
 
@@ -132,6 +134,7 @@ class TokenHealer:
                     splice_string=splice_string,
                     healed_text=full_text,
                     offset=len(cut_text),
+                    exact=True,
                 )
 
         # No exact boundary: still emit a usable prefill, but never claim healing.
@@ -141,9 +144,17 @@ class TokenHealer:
             splice_string=splice_string,
             healed_text=full_text,
             offset=len(prefix_text),
+            exact=False,
         )
 
-    def heal_and_splice(self, prefix_tokens: List[Any], splice_string: str) -> JumpForwardPrefill:
+    def heal_exact(self, prefix_text: str, splice_string: str, tokenizer: Any = None, **kwargs: Any) -> JumpForwardPrefill:
+        """Like :meth:`heal`, but raises instead of returning a non-exact fallback."""
+        result = self.heal(prefix_text, splice_string, tokenizer, **kwargs)
+        if not result.exact:
+            raise ValueError("no exact token boundary within the backup budget; full-prefix retokenization required")
+        return result
+
+    def heal_and_splice(self, prefix_tokens: list[Any], splice_string: str) -> JumpForwardPrefill:
         """Character-level compatibility API (no tokenizer required)."""
 
         if self.tokenizer is not None:
@@ -163,7 +174,7 @@ class TokenHealer:
         )
 
     def compute_token_healed_splice(
-        self, zero_dof_values: List[Any], last_token_id: Any = None
+        self, zero_dof_values: list[Any], last_token_id: Any = None
     ) -> JumpForwardPrefill:
         splice = "".join(str(v) for v in zero_dof_values)
         prefix = [last_token_id] if last_token_id is not None else []

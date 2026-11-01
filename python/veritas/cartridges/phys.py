@@ -9,17 +9,16 @@ evaluating them numerically, which is exactly the invariant ``vt.phys`` promises
 from __future__ import annotations
 
 import ast
-import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 # SI base dimensions: L, M, T, I, Theta, N, J
-Dimension = Tuple[Fraction, ...]
+Dimension = tuple[Fraction, ...]
 ZERO_DIM: Dimension = tuple(Fraction(0) for _ in range(7))
 
 
-def _dim(*values: Union[int, Fraction]) -> Dimension:
+def _dim(*values: int | Fraction) -> Dimension:
     return tuple(Fraction(v) for v in values)
 
 
@@ -56,7 +55,7 @@ def div_dim(a: Dimension, b: Dimension) -> Dimension:
     return sub_dim(a, b)
 
 
-def pow_dim(a: Dimension, exponent: Union[int, float, Fraction]) -> Dimension:
+def pow_dim(a: Dimension, exponent: int | float | Fraction) -> Dimension:
     factor = Fraction(exponent).limit_denominator(1000)
     return tuple(x * factor for x in a)
 
@@ -83,13 +82,13 @@ def dim_to_str(dim: Dimension) -> str:
 class Dim:
     exponents: Dimension = ZERO_DIM
 
-    def __mul__(self, other: "Dim") -> "Dim":
+    def __mul__(self, other: Dim) -> Dim:
         return Dim(add_dim(self.exponents, other.exponents))
 
-    def __truediv__(self, other: "Dim") -> "Dim":
+    def __truediv__(self, other: Dim) -> Dim:
         return Dim(sub_dim(self.exponents, other.exponents))
 
-    def __pow__(self, exponent: Union[int, float, Fraction]) -> "Dim":
+    def __pow__(self, exponent: int | float | Fraction) -> Dim:
         return Dim(pow_dim(self.exponents, exponent))
 
     @property
@@ -105,18 +104,18 @@ class Quantity:
     value: float
     dim: Dim = Dim()
 
-    def __mul__(self, other: "Quantity") -> "Quantity":
+    def __mul__(self, other: Quantity) -> Quantity:
         return Quantity(self.value * other.value, self.dim * other.dim)
 
-    def __truediv__(self, other: "Quantity") -> "Quantity":
+    def __truediv__(self, other: Quantity) -> Quantity:
         return Quantity(self.value / other.value, self.dim / other.dim)
 
-    def __add__(self, other: "Quantity") -> "Quantity":
+    def __add__(self, other: Quantity) -> Quantity:
         if self.dim != other.dim:
             raise ValueError(f"cannot add {self.dim!r} and {other.dim!r}")
         return Quantity(self.value + other.value, self.dim)
 
-    def __sub__(self, other: "Quantity") -> "Quantity":
+    def __sub__(self, other: Quantity) -> Quantity:
         if self.dim != other.dim:
             raise ValueError(f"cannot subtract {self.dim!r} and {other.dim!r}")
         return Quantity(self.value - other.value, self.dim)
@@ -193,7 +192,7 @@ def dimension_of_expression(expression: str, symbols: Mapping[str, Dimension]) -
     return Dim(_dim_of(tree, symbols))
 
 
-def check_equation(lhs: str, rhs: str, symbols: Mapping[str, Dimension]) -> Tuple[bool, str]:
+def check_equation(lhs: str, rhs: str, symbols: Mapping[str, Dimension]) -> tuple[bool, str]:
     try:
         left = dimension_of_expression(lhs, symbols)
         right = dimension_of_expression(rhs, symbols)
@@ -204,7 +203,7 @@ def check_equation(lhs: str, rhs: str, symbols: Mapping[str, Dimension]) -> Tupl
     return True, f"dimensionally consistent: {dim_to_str(left.exponents)}"
 
 
-def check_expression(expression: str, symbols: Mapping[str, Dimension]) -> Tuple[bool, str]:
+def check_expression(expression: str, symbols: Mapping[str, Dimension]) -> tuple[bool, str]:
     try:
         dim = dimension_of_expression(expression, symbols)
     except DimensionError as exc:

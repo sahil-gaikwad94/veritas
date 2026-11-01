@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any
 
 from .hf_transformers import VeritasLogitsProcessor
 
@@ -22,22 +22,25 @@ class VeritasVLLMBridge:
         self.tokenizer = tokenizer or getattr(model, "tokenizer", None)
         self.logits_processor = VLLMLogitsProcessor(self.tokenizer, spec)
 
+    def sampling_params(self) -> dict:
+        """Pass these to vLLM ``SamplingParams`` / ``LLM.generate`` to enforce masking."""
+        return {"logits_processors": [self.logits_processor]}
+
     def patch(self, engine: Any = None) -> Any:
         target = engine if engine is not None else self.model
         if target is None:
             return target
-        try:
-            existing = getattr(target, "logits_processor", None)
-            if existing is None:
-                setattr(target, "logits_processor", [self.logits_processor])
-            elif isinstance(existing, list):
-                if self.logits_processor not in existing:
-                    existing.append(self.logits_processor)
-            else:
-                setattr(target, "veritas_processor", self.logits_processor)
-            setattr(target, "veritas_spec", self.spec)
-        except Exception:
-            pass
+        existing = getattr(target, "logits_processors", None)
+        legacy = getattr(target, "logits_processor", None)
+        if isinstance(existing, list):
+            if self.logits_processor not in existing:
+                existing.append(self.logits_processor)
+        elif isinstance(legacy, list):
+            if self.logits_processor not in legacy:
+                legacy.append(self.logits_processor)
+        else:
+            raise TypeError("vLLM host exposes no logits_processors list; pass bridge.sampling_params() to SamplingParams")
+        target.veritas_spec = self.spec
         return target
 
 

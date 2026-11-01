@@ -18,19 +18,20 @@ class SGLangBridge:
         self.tokenizer = tokenizer or getattr(model, "tokenizer", None)
         self.logits_processor = SGLangLogitsProcessor(self.tokenizer, spec)
 
+    def sampling_params(self) -> dict:
+        return {"logits_processor": [self.logits_processor]}
+
     def patch(self, engine: Any = None) -> Any:
         target = engine if engine is not None else self.model
         if target is None:
             return target
-        try:
-            existing = getattr(target, "logits_processor", None)
-            if isinstance(existing, list):
+        existing = getattr(target, "logits_processor", None)
+        if isinstance(existing, list):
+            if self.logits_processor not in existing:
                 existing.append(self.logits_processor)
-            else:
-                setattr(target, "veritas_logits_processor", self.logits_processor)
-            setattr(target, "veritas_spec", self.spec)
-        except Exception:
-            pass
+        else:
+            raise TypeError("SGLang host exposes no logits_processor list; pass bridge.sampling_params() to the runtime")
+        target.veritas_spec = self.spec
         return target
 
 

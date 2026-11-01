@@ -11,7 +11,6 @@ from typing import Any
 
 from .hf_transformers import VeritasLogitsProcessor
 
-
 GBNF_JSON = r'''
 root   ::= value
 value  ::= object | array | string | number | "true" | "false" | "null"
@@ -35,14 +34,20 @@ class LlamaCppBridge:
         target = model if model is not None else self.model
         if target is None:
             return target
-        try:
-            setter = getattr(target, "set_logits_processor", None)
-            if callable(setter):
-                setter(self.logits_processor)
-            setattr(target, "veritas_logits_processor", self.logits_processor)
-            setattr(target, "veritas_grammar", self.grammar)
-        except Exception:
-            pass
+        setter = getattr(target, "set_logits_processor", None)
+        if callable(setter):
+            setter(self.logits_processor)
+            target.veritas_logits_processor = self.logits_processor
+        elif hasattr(target, "grammar"):
+            if self.spec is not None:
+                raise TypeError(
+                    "grammar-only llama.cpp hosts cannot enforce a Veritas spec with the generic "
+                    "JSON grammar; use a logits-processor host or supply a schema-specific GBNF"
+                )
+            target.grammar = self.grammar
+        else:
+            raise TypeError("llama.cpp host exposes neither set_logits_processor nor grammar; pass bridge.grammar to Llama(grammar=...)")
+        target.veritas_grammar = self.grammar
         return target
 
 

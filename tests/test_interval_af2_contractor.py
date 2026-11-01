@@ -1,13 +1,11 @@
 """Phase 2 tests: interval contractor, AF2, HC4 revise, volume twist."""
 
-import math
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import veritas as vt
-from veritas.interval import Interval, Hc4AffineContractor, ResidualAccumulator, AffineForm
+from veritas.interval import AffineForm, Hc4AffineContractor, Interval, ResidualAccumulator
 
 
 def test_interval_from_numeric_prefix_rejects():

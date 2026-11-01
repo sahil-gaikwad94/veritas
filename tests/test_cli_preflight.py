@@ -7,10 +7,8 @@ import pytest
 from pydantic import BaseModel, Field
 
 import veritas as vt
-
 from veritas.cli.main import load_schemas, main
 from veritas.compiler.preflight import InfeasibleSpecError, initial_domains, run_preflight
-
 
 SCHEMA_SOURCE = '''
 import veritas as vt

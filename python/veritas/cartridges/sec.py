@@ -8,17 +8,28 @@ finite-trace semantics rather than ad-hoc ordering checks.
 
 from __future__ import annotations
 
-import copy
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any
 
 from ..ltlf import (
     Formula,
     Trace,
+)
+from ..ltlf import (
     always as always_formula,
+)
+from ..ltlf import (
     at_most as at_most_formula,
+)
+from ..ltlf import (
     before as before_formula,
+)
+from ..ltlf import (
     never as never_formula,
+)
+from ..ltlf import (
     responds as responds_formula,
 )
 
@@ -26,24 +37,24 @@ from ..ltlf import (
 class PolicyViolation(RuntimeError):
     """Raised when a tool call or a trace violates a declared policy."""
 
-    def __init__(self, message: str, *, policy: Optional[str] = None, tool: Optional[str] = None,
-                 details: Optional[Mapping[str, Any]] = None):
+    def __init__(self, message: str, *, policy: str | None = None, tool: str | None = None,
+                 details: Mapping[str, Any] | None = None):
         self.policy = policy
         self.tool = tool
         self.details = dict(details or {})
         super().__init__(message)
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {"message": str(self), "policy": self.policy, "tool": self.tool, "details": self.details}
 
 
 @dataclass
 class ToolSpec:
     name: str
-    requires: List[str] = field(default_factory=list)
-    effects: List[str] = field(default_factory=list)
+    requires: list[str] = field(default_factory=list)
+    effects: list[str] = field(default_factory=list)
     cost: float = 0.0
-    budget_key: Optional[str] = None
+    budget_key: str | None = None
     description: str = ""
     mutating: bool = False
 
@@ -61,22 +72,22 @@ class WorldState:
     def __init__(self):
         self.trace = Trace()
         self.facts: set = set()
-        self.tools: Dict[str, ToolSpec] = {}
-        self.policies: List[Policy] = []
-        self.budgets: Dict[str, float] = {}
-        self.spent: Dict[str, float] = {}
-        self.history: List[Any] = []  # backwards-compatible ("assert", fact) log
-        self.violations: List[PolicyViolation] = []
+        self.tools: dict[str, ToolSpec] = {}
+        self.policies: list[Policy] = []
+        self.budgets: dict[str, float] = {}
+        self.spent: dict[str, float] = {}
+        self.history: list[Any] = []  # backwards-compatible ("assert", fact) log
+        self.violations: list[PolicyViolation] = []
 
     # -- declaration -----------------------------------------------------
     def declare_tool(
         self,
         name: str,
-        requires: Optional[Sequence[str]] = None,
-        effects: Optional[Sequence[str]] = None,
+        requires: Sequence[str] | None = None,
+        effects: Sequence[str] | None = None,
         *,
         cost: float = 0.0,
-        budget_key: Optional[str] = None,
+        budget_key: str | None = None,
         description: str = "",
         mutating: bool = False,
     ) -> ToolSpec:
@@ -95,7 +106,7 @@ class WorldState:
     def set_budget(self, key: str, limit: float) -> None:
         self.budgets[key] = float(limit)
 
-    def remaining(self, key: str) -> Optional[float]:
+    def remaining(self, key: str) -> float | None:
         if key not in self.budgets:
             return None
         return self.budgets[key] - self.spent.get(key, 0.0)
@@ -119,7 +130,7 @@ class WorldState:
     def has(self, fact: str) -> bool:
         return fact in self.facts
 
-    def can_call(self, tool: str, preconditions: Optional[Sequence[str]] = None) -> bool:
+    def can_call(self, tool: str, preconditions: Sequence[str] | None = None) -> bool:
         spec = self.tools.get(tool)
         required = list(preconditions) if preconditions is not None else (
             list(spec.requires) if spec is not None else []
@@ -133,15 +144,24 @@ class WorldState:
         return True
 
     def record_call(self, tool: str, **data: Any) -> Any:
-        spec = self.tools.get(tool)
-        event = self.trace.append(tool, dict(data))
-        self.history.append(("call", tool))
-        if spec is not None:
-            for effect in spec.effects:
-                self.facts.add(effect)
-            if spec.budget_key is not None and spec.cost:
-                self.spent[spec.budget_key] = self.spent.get(spec.budget_key, 0.0) + spec.cost
-        return event
+        """Atomically check preconditions/budgets/policies, then commit the call."""
+        self.before_tool_call(tool, data)
+        snapshot = self.snapshot()
+        try:
+            event = self.trace.append(tool, dict(data))
+            self.history.append(("call", tool))
+            spec = self.tools.get(tool)
+            if spec is not None:
+                for effect in spec.effects:
+                    self.facts.add(effect)
+                if spec.budget_key is not None and spec.cost:
+                    if not self.spend(spec.budget_key, spec.cost):
+                        raise PolicyViolation(f"budget {spec.budget_key!r} exceeded", tool=tool)
+            self.enforce()
+            return event
+        except Exception:
+            self.restore(snapshot)
+            raise
 
     def call(self, tool: str, **data: Any) -> Any:
         spec = self.tools.get(tool)
@@ -154,27 +174,48 @@ class WorldState:
             )
         return self.record_call(tool, **data)
 
-    def before_tool_call(self, tool: str, kwargs: Optional[Mapping[str, Any]] = None) -> None:
+    def before_tool_call(self, tool: str, kwargs: Mapping[str, Any] | None = None) -> None:
         spec = self.tools.get(tool)
         if spec is not None and not self.can_call(tool):
             missing = [fact for fact in spec.requires if not self.has(fact)]
+            remaining = self.remaining(spec.budget_key) if spec.budget_key else None
             raise PolicyViolation(
-                f"tool {tool!r} precondition not satisfied; missing facts: {missing}",
+                f"tool {tool!r} precondition/budget not satisfied; missing facts: {missing}",
                 tool=tool,
-                details={"missing": missing},
+                details={"missing": missing, "remaining": remaining},
             )
+        # Prospective temporal-policy check: would this call violate a policy?
+        snapshot = self.snapshot()
+        try:
+            self.trace.append(tool, dict(kwargs or {}))
+            violations = [v for v in self.validate() if v.policy is not None]
+            if violations:
+                raise violations[0]
+        finally:
+            self.restore(snapshot)
+
+    @contextmanager
+    def transaction(self):
+        snapshot = self.snapshot()
+        try:
+            yield self
+        except Exception:
+            self.restore(snapshot)
+            raise
 
     # -- temporal policies ----------------------------------------------
-    def add_policy(self, formula: Any, name: Optional[str] = None, severity: str = "error") -> Policy:
+    def add_policy(self, formula: Any, name: str | None = None, severity: str = "error") -> Policy:
         if not isinstance(formula, Formula):
             formula = always_formula(formula)
         policy = Policy(name=name or formula.label, formula=formula, severity=severity)
         self.policies.append(policy)
         return policy
 
-    def validate(self) -> List[PolicyViolation]:
-        found: List[PolicyViolation] = []
+    def validate(self, *, errors_only: bool = False) -> list[PolicyViolation]:
+        found: list[PolicyViolation] = []
         for policy in self.policies:
+            if errors_only and policy.severity != "error":
+                continue
             try:
                 ok = policy.formula.evaluate(self.trace)
             except Exception as exc:  # pragma: no cover - defensive
@@ -191,7 +232,7 @@ class WorldState:
         return found
 
     def enforce(self) -> None:
-        violations = self.validate()
+        violations = self.validate(errors_only=True)
         if violations:
             self.violations.extend(violations)
             raise violations[0]
@@ -207,23 +248,27 @@ class WorldState:
     def always(self, condition: bool) -> bool:
         return bool(condition)
 
-    def trace_names(self) -> List[str]:
+    def trace_names(self) -> list[str]:
         return self.trace.names()
 
     # -- snapshots -------------------------------------------------------
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         return {
             "facts": set(self.facts),
             "spent": dict(self.spent),
             "events": list(self.trace.events),
+            "history": list(self.history),
+            "violations": list(self.violations),
         }
 
     def restore(self, snapshot: Mapping[str, Any]) -> None:
         self.facts = set(snapshot.get("facts") or [])
         self.spent = dict(snapshot.get("spent") or {})
         self.trace = Trace(list(snapshot.get("events") or []))
+        self.history = list(snapshot.get("history") or [])
+        self.violations = list(snapshot.get("violations") or [])
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "facts": sorted(self.facts),
             "trace": self.trace.as_dict(),

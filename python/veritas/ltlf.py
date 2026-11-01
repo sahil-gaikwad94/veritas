@@ -8,15 +8,16 @@ external temporal model checker.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any
 
 
 @dataclass(frozen=True)
 class Event:
     name: str
     step: int = 0
-    data: Dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
 
     def __str__(self) -> str:  # pragma: no cover - presentation
         return f"{self.name}@{self.step}"
@@ -25,20 +26,20 @@ class Event:
 class Trace:
     """An append-only finite trace of named events."""
 
-    def __init__(self, events: Optional[Iterable[Event]] = None):
-        self.events: List[Event] = list(events or [])
+    def __init__(self, events: Iterable[Event] | None = None):
+        self.events: list[Event] = list(events or [])
         self._step = max((e.step for e in self.events), default=0)
 
-    def append(self, name: str, data: Optional[Dict[str, Any]] = None) -> Event:
+    def append(self, name: str, data: dict[str, Any] | None = None) -> Event:
         self._step += 1
         event = Event(name=name, step=self._step, data=dict(data or {}))
         self.events.append(event)
         return event
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         return [event.name for event in self.events]
 
-    def positions(self, name: str) -> List[int]:
+    def positions(self, name: str) -> list[int]:
         return [index for index, event in enumerate(self.events) if event.name == name]
 
     def occurred(self, name: str) -> bool:
@@ -47,20 +48,23 @@ class Trace:
     def count(self, name: str) -> int:
         return sum(1 for event in self.events if event.name == name)
 
-    def first(self, name: str) -> Optional[Event]:
+    def first(self, name: str) -> Event | None:
         for event in self.events:
             if event.name == name:
                 return event
         return None
 
-    def last(self, name: str) -> Optional[Event]:
+    def last(self, name: str) -> Event | None:
         for event in reversed(self.events):
             if event.name == name:
                 return event
         return None
 
-    def prefix(self, length: int) -> "Trace":
+    def prefix(self, length: int) -> Trace:
         return Trace(self.events[: max(0, length)])
+
+    def suffix(self, start: int) -> Trace:
+        return Trace(self.events[max(0, start):])
 
     def __len__(self) -> int:
         return len(self.events)
@@ -68,7 +72,7 @@ class Trace:
     def __iter__(self):
         return iter(self.events)
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {"events": [{"name": e.name, "step": e.step, "data": e.data} for e in self.events]}
 
 
@@ -95,13 +99,13 @@ class Formula:
     def __call__(self, target: Any) -> bool:
         return self.evaluate(target)
 
-    def __and__(self, other: "Formula") -> "Formula":
+    def __and__(self, other: Formula) -> Formula:
         return And(self, other)
 
-    def __or__(self, other: "Formula") -> "Formula":
+    def __or__(self, other: Formula) -> Formula:
         return Or(self, other)
 
-    def __invert__(self) -> "Formula":
+    def __invert__(self) -> Formula:
         return Not(self)
 
     def __repr__(self) -> str:
@@ -142,8 +146,10 @@ class Always(Formula):
 
     def evaluate(self, target: Any) -> bool:
         trace = _trace_of(target)
-        # Finite-trace semantics: every prefix state satisfies the inner formula.
-        return all(self.inner.evaluate(trace.prefix(i)) for i in range(len(trace) + 1))
+        # LTLf: G φ holds at every position of the (non-empty) trace suffix.
+        if not trace.events:
+            return True
+        return all(self.inner.evaluate(trace.suffix(i)) for i in range(len(trace)))
 
 
 class Eventually(Formula):
@@ -153,7 +159,9 @@ class Eventually(Formula):
 
     def evaluate(self, target: Any) -> bool:
         trace = _trace_of(target)
-        return any(self.inner.evaluate(trace.prefix(i)) for i in range(len(trace) + 1))
+        if not trace.events:
+            return False
+        return any(self.inner.evaluate(trace.suffix(i)) for i in range(len(trace)))
 
 
 class Before(Formula):

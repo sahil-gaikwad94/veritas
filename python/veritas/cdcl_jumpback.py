@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -15,26 +15,26 @@ class ClauseCheckpoint:
     start_token_idx: int = 0
     end_token_idx: int = 0
     mean_shannon_entropy: float = 0.0
-    token_sequence: List[Any] = field(default_factory=list)
+    token_sequence: list[Any] = field(default_factory=list)
     conflict_count: int = 0
 
 
 @dataclass
 class ConflictBranchRecord:
-    prefix_tokens: List[Any] = field(default_factory=list)
-    rejected_clause_tokens: List[Any] = field(default_factory=list)
-    unsat_core_ids: List[Any] = field(default_factory=list)
+    prefix_tokens: list[Any] = field(default_factory=list)
+    rejected_clause_tokens: list[Any] = field(default_factory=list)
+    unsat_core_ids: list[Any] = field(default_factory=list)
     violation_margin: float = 0.0
 
 
 class TabuPrefixTrie:
     def __init__(self):
-        self.entries: Dict[int, set] = {}
+        self.entries: dict[int, set] = {}
 
-    def add(self, start_idx: int, seq: List[Any]) -> None:
+    def add(self, start_idx: int, seq: list[Any]) -> None:
         self.entries.setdefault(start_idx, set()).add(tuple(seq))
 
-    def contains(self, start_idx: int, seq: List[Any]) -> bool:
+    def contains(self, start_idx: int, seq: list[Any]) -> bool:
         return tuple(seq) in self.entries.get(start_idx, set())
 
 
@@ -42,10 +42,10 @@ class CdclJumpbackEngine:
     def __init__(self, lambda_: float = 0.5, gamma: float = 0.1):
         self.lambda_ = lambda_
         self.gamma = gamma
-        self.checkpoints: List[ClauseCheckpoint] = []
+        self.checkpoints: list[ClauseCheckpoint] = []
         self.tabu = TabuPrefixTrie()
-        self.domain_cuts: List[Dict[str, Any]] = []
-        self.records: List[ConflictBranchRecord] = []
+        self.domain_cuts: list[dict[str, Any]] = []
+        self.records: list[ConflictBranchRecord] = []
 
     def push_checkpoint(self, cp: ClauseCheckpoint) -> None:
         self.checkpoints.append(cp)
@@ -62,14 +62,14 @@ class CdclJumpbackEngine:
             diff = float(len(self.checkpoints) - self.checkpoints.index(cp) - 1)
         return cp.mean_shannon_entropy * math.exp(-self.lambda_ * diff) + self.gamma * cp.conflict_count
 
-    def select_culprit(self, unsat_core: List[Any]) -> Optional[ClauseCheckpoint]:
+    def select_culprit(self, unsat_core: list[Any]) -> ClauseCheckpoint | None:
         candidates = [cp for cp in self.checkpoints if cp.clause_id in unsat_core]
         if not candidates:
             # fallback: last checkpoint
             return self.checkpoints[-1] if self.checkpoints else None
         return max(candidates, key=lambda cp: self.culprit_score(cp, unsat_core[-1] if unsat_core else len(self.checkpoints)))
 
-    def jumpback(self, unsat_core: List[Any]) -> Dict[str, Any]:
+    def jumpback(self, unsat_core: list[Any]) -> dict[str, Any]:
         culprit = self.select_culprit(unsat_core)
         if culprit is None:
             return {"target_clause": None, "rewind_to": None}
@@ -98,12 +98,12 @@ class CdclJumpbackEngine:
             "domain_cut": cut,
         }
 
-    def apply_domain_cut(self, culprit: ClauseCheckpoint, direction: str = "upper") -> Dict[str, Any]:
+    def apply_domain_cut(self, culprit: ClauseCheckpoint, direction: str = "upper") -> dict[str, Any]:
         if direction == "upper":
             return {"var_id": culprit.var_id, "new_upper": culprit.committed_val}
         return {"var_id": culprit.var_id, "new_lower": culprit.committed_val}
 
-    def export_records(self) -> List[ConflictBranchRecord]:
+    def export_records(self) -> list[ConflictBranchRecord]:
         return list(self.records)
 
 

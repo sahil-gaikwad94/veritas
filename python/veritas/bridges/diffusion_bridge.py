@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Any, Mapping, Optional, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 
-def gumbel_max_sample(logits: Any, temperature: float = 1.0, rng: Optional[random.Random] = None):
+def gumbel_max_sample(logits: Any, temperature: float = 1.0, rng: random.Random | None = None):
     """Sample an index/key from logits using the Gumbel-max trick.
 
     Mapping logits return their key; sequences return an integer index.  ``temperature``
@@ -51,7 +52,7 @@ def unmask_order(confidences: Sequence[float]) -> list:
 
 
 class DiffusionBridge:
-    def __init__(self, model: Any = None, spec: Any = None, *, seed: Optional[int] = None):
+    def __init__(self, model: Any = None, spec: Any = None, *, seed: int | None = None):
         self.model = model
         self.spec = spec
         self.rng = random.Random(seed)
@@ -59,7 +60,7 @@ class DiffusionBridge:
     def sample_token(self, logits: Any, temperature: float = 1.0) -> Any:
         return gumbel_max_sample(logits, temperature, self.rng)
 
-    def step(self, token_logits: Sequence[Any], mask: Sequence[bool], temperature: float = 1.0) -> Optional[int]:
+    def step(self, token_logits: Sequence[Any], mask: Sequence[bool], temperature: float = 1.0) -> int | None:
         """Choose the masked position with the highest sampled confidence and its token."""
 
         candidates = [i for i, masked in enumerate(mask) if masked]

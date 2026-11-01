@@ -99,8 +99,8 @@ def test_container_residual_accumulator_and_zero_dof_splice():
     expected = sum(weights[k] * RET[k] for k in weights)
     variance = 0.0
     labels = list(weights.keys())
-    for i, a in enumerate(labels):
-        for j, b in enumerate(labels):
+    for _i, a in enumerate(labels):
+        for _j, b in enumerate(labels):
             key = (a, b) if (a, b) in COV else (b, a)
             variance += weights[a] * COV[key] * weights[b]
     assert abs(parsed["expected_return"] - expected) < 1e-4

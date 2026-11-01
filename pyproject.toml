@@ -1,14 +1,18 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
-build-backend = "maturin"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "veritas-ai"
 version = "2.0.0"
 description = "Neuro-symbolic solver-guided decoding and formal verification engine"
+readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = [
     "pydantic>=2.0",
+    "jsonschema>=4.18",
+    "sqlglot>=25",
 ]
 
 [project.scripts]
@@ -18,13 +22,26 @@ veritas = "veritas.cli.main:main"
 z3 = ["z3-solver>=4.13"]
 cas = ["sympy>=1.12", "numpy>=1.26"]
 rl = ["datasets>=2.0", "transformers>=4.40"]
+dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "build>=1.2"]
 
-[tool.maturin]
-bindings = "pyo3"
-python-source = "python"
-module-name = "veritas._native"
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.setuptools.package-data]
+veritas = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["python"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "E741", "B008", "B905"]
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F403"]
+"python/veritas/cartridges/code.py" = ["F403"]

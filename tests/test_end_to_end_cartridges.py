@@ -5,15 +5,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.cartridges.quant import portfolio_weights_valid, sharpe_ratio, gaap_balance
-from veritas.cartridges.sql import SqlVerifier
-from veritas.cartridges.sec import WorldState
-from veritas.cartridges.phys import homogeneous, FORCE, MASS, ACCELERATION
-from veritas.cartridges.stat import probability_simplex, frechet_lower, frechet_upper
+from veritas.bridges.instructor_bridge import INSTRUCTOR_MODE, patch_openai
 from veritas.cartridges.or_sched import no_overlap
-from veritas.bridges.instructor_bridge import patch_openai, INSTRUCTOR_MODE
-from veritas.rl.collector import VeritasRLCollector
+from veritas.cartridges.phys import FORCE, homogeneous
+from veritas.cartridges.quant import gaap_balance, portfolio_weights_valid, sharpe_ratio
+from veritas.cartridges.sec import WorldState
+from veritas.cartridges.sql import SqlVerifier
+from veritas.cartridges.stat import frechet_lower, frechet_upper, probability_simplex
 from veritas.cli.main import main
+from veritas.rl.collector import VeritasRLCollector
 
 
 def test_quant():
@@ -61,6 +61,9 @@ def test_bridge():
 def test_rl():
     col = VeritasRLCollector()
     col.record_conflict_branch(None, None, [1,2])
+    # Incomplete conflict records are not DPO pairs.
+    assert col.export_step_dpo()["num_records"] == 0
+    col.add_preference("p", chosen="good", rejected="bad")
     out = col.export_step_dpo()
     assert out["num_records"] == 1
 

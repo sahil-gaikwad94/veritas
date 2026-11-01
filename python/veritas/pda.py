@@ -7,7 +7,8 @@ work with a fixed vocabulary.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set
+from collections.abc import Sequence
+from typing import Any
 
 from .json_pda import JSONPushdownAutomaton, TokenMasker
 
@@ -15,7 +16,7 @@ from .json_pda import JSONPushdownAutomaton, TokenMasker
 class PushdownAutomaton:
     """Byte/char-level JSON PDA with optional vocabulary bitmasks."""
 
-    def __init__(self, vocab_size: int = 0, vocabulary: Optional[Sequence[str]] = None,
+    def __init__(self, vocab_size: int = 0, vocabulary: Sequence[str] | None = None,
                  language: str = "json"):
         self.vocab_size = vocab_size
         self.vocabulary = list(vocabulary) if vocabulary else None
@@ -32,13 +33,13 @@ class PushdownAutomaton:
         return self.machine.state
 
     @property
-    def stack(self) -> List[Dict[str, Any]]:
+    def stack(self) -> list[dict[str, Any]]:
         return self.machine.stack
 
     def feed(self, text: str) -> bool:
         return self.machine.feed(text)
 
-    def get_valid_token_bitmask(self, state: Any = None, prefix: Optional[str] = None) -> int:
+    def get_valid_token_bitmask(self, state: Any = None, prefix: str | None = None) -> int:
         """Return a bitmask; with no vocabulary every bit is valid (legacy behaviour)."""
 
         if not self.vocabulary or self.vocab_size <= 0:
@@ -62,7 +63,7 @@ class PushdownAutomaton:
             self.machine.feed(text)
         return self.machine.state
 
-    def accepts(self, token_ids: Optional[Sequence[int]] = None) -> bool:
+    def accepts(self, token_ids: Sequence[int] | None = None) -> bool:
         if token_ids is None:
             return self.machine.accepts()
         target = JSONPushdownAutomaton()
@@ -75,7 +76,7 @@ class PushdownAutomaton:
                 return False
         return target.accepts()
 
-    def allowed_chars(self) -> Set[str]:
+    def allowed_chars(self) -> set[str]:
         return self.machine.allowed_chars()
 
 

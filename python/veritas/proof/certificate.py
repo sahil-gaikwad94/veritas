@@ -22,17 +22,16 @@ import hmac
 import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Generic, List, Mapping, Optional, Sequence, Tuple, TypeVar
+from typing import Any, Generic, TypeVar
 
 from ..compiler.vir import VirSpec, VirType
-from ..evaluate import expr_to_str, format_number
+from ..evaluate import expr_to_str
 from ..instance import VerificationError, VerificationReport, _coerce_spec, verify_values
 from ..serde import (
-    SERDE_VERSION,
     _decode_value,
-    _encode_value,
     canonical_json,
     digest_of_instance,
     sha256_hex,
@@ -79,7 +78,7 @@ def _smt_real(value: float) -> str:
     return f"(/ {numerator} {denominator})"
 
 
-def _sort_for(vtype: Optional[VirType]) -> str:
+def _sort_for(vtype: VirType | None) -> str:
     kind = getattr(vtype, "kind", "real")
     if kind == "int":
         return "Int"
@@ -92,10 +91,11 @@ class _SmtRenderer:
     def __init__(self, spec: VirSpec, witness: Mapping[str, Any]):
         self.spec = spec
         self.witness = witness
-        self.symbol_by_var: Dict[int, str] = {}
-        self.decls: List[Tuple[str, str]] = []
-        self.elem_symbols: Dict[Tuple[int, Any], str] = {}
-        self.skipped: List[str] = []
+        self.symbol_by_var: dict[int, str] = {}
+        self.decls: list[tuple[str, str]] = []
+        self.elem_symbols: dict[tuple[int, Any], str] = {}
+        self.skipped: list[str] = []
+        self.omitted: list[dict[str, Any]] = []
         self._container_ids = set(spec.containers.keys())
         for vid, info in spec.variables.items():
             name = info.get("name") or spec.id_to_name.get(vid, str(vid))
@@ -122,7 +122,7 @@ class _SmtRenderer:
             self.decls.append((symbol, _sort_for(vtype)))
 
     # -- helpers ---------------------------------------------------------
-    def _var_symbol(self, node: Any) -> Optional[str]:
+    def _var_symbol(self, node: Any) -> str | None:
         vid = getattr(node, "var_id", None)
         if vid is None:
             name = getattr(node, "name", None)
@@ -131,7 +131,7 @@ class _SmtRenderer:
             return None
         return self.symbol_by_var.get(vid)
 
-    def _container_var_id(self, node: Any) -> Optional[int]:
+    def _container_var_id(self, node: Any) -> int | None:
         if node is None:
             return None
         if getattr(node, "kind", None) == "values" and node.args:
@@ -143,14 +143,14 @@ class _SmtRenderer:
             vid = self.spec.name_to_id.get(node.name)
         return vid if vid in self._container_ids else None
 
-    def _container_keys(self, vid: int) -> List[Any]:
+    def _container_keys(self, vid: int) -> list[Any]:
         return [key for (cid, key) in self.elem_symbols if cid == vid]
 
-    def _container_symbol(self, vid: int, key: Any) -> Optional[str]:
+    def _container_symbol(self, vid: int, key: Any) -> str | None:
         return self.elem_symbols.get((vid, key))
 
     # -- translation -----------------------------------------------------
-    def expr(self, node: Any, elem_symbol: Optional[str] = None) -> Optional[str]:
+    def expr(self, node: Any, elem_symbol: str | None = None) -> str | None:
         if node is None:
             return None
         kind = getattr(node, "kind", None)
@@ -221,12 +221,12 @@ class _SmtRenderer:
             returns = getattr(node, "value", None)
             if vid is None or not isinstance(returns, Mapping):
                 return None
-            terms: List[str] = []
+            terms: list[str] = []
             for key in self._container_keys(vid):
                 coefficient = returns.get(key)
                 symbol = self._container_symbol(vid, key)
                 if coefficient is None or symbol is None:
-                    continue
+                    return None
                 terms.append(f"(* {symbol} {_smt_real(coefficient)})")
             if not terms:
                 return "0"
@@ -239,20 +239,20 @@ class _SmtRenderer:
                 return None
             keys = self._container_keys(vid)
             labels = list(keys)
-            matrix: Dict[Tuple[Any, Any], float] = {}
+            matrix: dict[tuple[Any, Any], float] = {}
             for key, value in cov.items():
                 a, b = key if isinstance(key, tuple) and len(key) == 2 else (key, key)
                 matrix[(a, b)] = float(value)
                 if a != b:
                     matrix[(b, a)] = float(value)
-            terms: List[str] = []
+            terms: list[str] = []
             for a in labels:
                 for b in labels:
                     coefficient = matrix.get((a, b))
                     sym_a = self._container_symbol(vid, a)
                     sym_b = self._container_symbol(vid, b)
                     if coefficient is None or sym_a is None or sym_b is None:
-                        continue
+                        return None
                     terms.append(f"(* {sym_a} {sym_b} {_smt_real(coefficient)})")
             if not terms:
                 return "0"
@@ -262,7 +262,7 @@ class _SmtRenderer:
             vid = self._container_var_id(iterable)
             if vid is None:
                 return None
-            parts: List[str] = []
+            parts: list[str] = []
             for key in self._container_keys(vid):
                 symbol = self._container_symbol(vid, key)
                 if symbol is None:
@@ -275,9 +275,16 @@ class _SmtRenderer:
                 return "true"
             return parts[0] if len(parts) == 1 else "(and " + " ".join(parts) + ")"
         if kind == "keys_subset":
-            # Declared element symbols come from the witness, which the operator supplied;
-            # the subset fact is therefore structural and reported as true.
-            return "true"
+            vid = self._container_var_id(node.args[0] if node.args else None)
+            allowed = getattr(node, "value", None)
+            name = self.spec.id_to_name.get(vid) if vid is not None else None
+            container = self.witness.get(name)
+            if vid is None or not isinstance(container, Mapping) or allowed is None:
+                return None
+            try:
+                return "true" if set(container).issubset(set(allowed)) else "false"
+            except TypeError:
+                return None
         if kind == "subscript":
             base = node.args[0] if node.args else None
             vid = self._container_var_id(base)
@@ -303,7 +310,7 @@ class _SmtRenderer:
             right = self.expr(node.rhs, elem_symbol)
             if left is None or right is None:
                 return None
-            tol = float(getattr(node, "tol", 1e-6) or 1e-6)
+            tol = float(getattr(node, "tol", 0.0) or 0.0)
             tol_s = _smt_real(tol)
             op = getattr(node, "op", "eq")
             if op == "eq":
@@ -322,7 +329,7 @@ class _SmtRenderer:
         return None
 
     def render(self, *, spec_hash: str, witness_hash: str) -> str:
-        lines: List[str] = [
+        lines: list[str] = [
             "; veritas proof certificate (v" + CERTIFICATE_VERSION + ")",
             f"; spec_sha256:    {spec_hash}",
             f"; witness_sha256: {witness_hash}",
@@ -344,6 +351,7 @@ class _SmtRenderer:
             rendered = self.expr(expr)
             text = expr_to_str(expr, self.spec.id_to_name)
             if rendered is None:
+                self.omitted.append({"kind": "require", "index": index, "text": text})
                 lines.append(f"; [unrendered require #{index}] {text}")
                 continue
             lines.append(f"; require #{index}: {text}")
@@ -352,6 +360,7 @@ class _SmtRenderer:
             rendered = self.expr(expr)
             text = expr_to_str(expr, self.spec.id_to_name)
             if rendered is None:
+                self.omitted.append({"kind": "derive", "index": index, "text": text})
                 lines.append(f"; [unrendered derive #{index}] {text}")
                 continue
             lines.append(f"; derive #{index}: {text}")
@@ -408,9 +417,14 @@ def _plain_data(value: Any) -> Any:
     return str(value)
 
 
-def render_smt2(spec: VirSpec, witness: Mapping[str, Any]) -> str:
+def render_smt2_with_coverage(spec: VirSpec, witness: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     renderer = _SmtRenderer(spec, witness)
-    return renderer.render(spec_hash=spec_digest(spec), witness_hash=digest_of_instance(witness))
+    text = renderer.render(spec_hash=spec_digest(spec), witness_hash=digest_of_instance(witness))
+    return text, {"complete": not renderer.omitted, "omitted": list(renderer.omitted)}
+
+
+def render_smt2(spec: VirSpec, witness: Mapping[str, Any]) -> str:
+    return render_smt2_with_coverage(spec, witness)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -424,12 +438,15 @@ class ProofCertificate:
     witness_sha256: str = ""
     sha256: str = ""
     smt2: str = ""
-    witness: Dict[str, Any] = field(default_factory=dict)
-    spec_payload: Optional[Dict[str, Any]] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    witness: dict[str, Any] = field(default_factory=dict)
+    spec_payload: dict[str, Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    smt2_sha256: str = ""
+    smt2_complete: bool = False
+    smt2_omitted: list[dict[str, Any]] = field(default_factory=list)
 
     # -- canonical payload / digest --------------------------------------
-    def digest_payload(self) -> Dict[str, Any]:
+    def digest_payload(self) -> dict[str, Any]:
         return {
             "version": self.version,
             "spec_sha256": self.spec_sha256,
@@ -438,18 +455,24 @@ class ProofCertificate:
             "spec": self.spec_payload,
             "smt2": self.smt2,
             "metadata": _plain_data(self.metadata),
+            "smt2_sha256": self.smt2_sha256,
+            "smt2_complete": self.smt2_complete,
+            "smt2_omitted": _plain_data(self.smt2_omitted),
         }
 
     def compute_digest(self) -> str:
         return sha256_hex(canonical_json(self.digest_payload()))
 
-    def seal(self) -> "ProofCertificate":
+    def seal(self) -> ProofCertificate:
+        if self.spec_payload is not None:
+            self.spec_sha256 = spec_digest(spec_from_dict(self.spec_payload))
         self.witness_sha256 = digest_of_instance(self.witness)
+        self.smt2_sha256 = sha256_hex(self.smt2)
         self.sha256 = self.compute_digest()
         return self
 
     # -- serialization ---------------------------------------------------
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             **self.digest_payload(),
             "sha256": self.sha256,
@@ -459,7 +482,7 @@ class ProofCertificate:
         return json.dumps(self.to_dict(), indent=indent, sort_keys=True, default=str)
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "ProofCertificate":
+    def from_dict(cls, payload: Mapping[str, Any]) -> ProofCertificate:
         raw_witness = payload.get("witness") or {}
         if isinstance(raw_witness, Mapping) and "__pairs__" in raw_witness:
             raw_witness = _decode_value(raw_witness)
@@ -475,10 +498,13 @@ class ProofCertificate:
             witness=dict(raw_witness) if isinstance(raw_witness, Mapping) else {},
             spec_payload=payload.get("spec"),
             metadata=dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {},
+            smt2_sha256=str(payload.get("smt2_sha256", "")),
+            smt2_complete=bool(payload.get("smt2_complete", False)),
+            smt2_omitted=list(payload.get("smt2_omitted") or []),
         )
 
     @classmethod
-    def load(cls, path: Any) -> "ProofCertificate":
+    def load(cls, path: Any) -> ProofCertificate:
         text = Path(path).read_text(encoding="utf-8")
         return cls.from_dict(json.loads(text))
 
@@ -502,22 +528,22 @@ class CertificateCheck:
     ok: bool
     detail: str = ""
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {"name": self.name, "ok": self.ok, "detail": self.detail}
 
 
 @dataclass
 class CertificateVerification:
-    checks: List[CertificateCheck] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
-    report: Optional[VerificationReport] = None
-    certificate: Optional[ProofCertificate] = None
+    checks: list[CertificateCheck] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    report: VerificationReport | None = None
+    certificate: ProofCertificate | None = None
 
     @property
     def ok(self) -> bool:
         return bool(self.checks) and all(c.ok for c in self.checks) and not self.errors
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
             "checks": [c.as_dict() for c in self.checks],
@@ -526,7 +552,7 @@ class CertificateVerification:
             "spec_sha256": self.certificate.spec_sha256 if self.certificate else None,
         }
 
-    def raise_if_failed(self) -> "CertificateVerification":
+    def raise_if_failed(self) -> CertificateVerification:
         if not self.ok:
             raise VerificationError(self.report) if self.report is not None else CertificateError(
                 "; ".join(self.errors) or "certificate verification failed"
@@ -563,8 +589,8 @@ def verify_certificate(
     the witness.  ``expected_spec`` additionally binds the certificate to a live spec.
     """
 
-    checks: List[CertificateCheck] = []
-    errors: List[str] = []
+    checks: list[CertificateCheck] = []
+    errors: list[str] = []
 
     try:
         certificate = _load_certificate(source)
@@ -598,13 +624,8 @@ def verify_certificate(
         CertificateCheck("witness_sha256", witness_ok, "witness digest matches" if witness_ok else "witness digest mismatch")
     )
 
-    checks.append(
-        CertificateCheck(
-            "smt2",
-            "(check-sat)" in certificate.smt2 and "(set-logic" in certificate.smt2,
-            "SMT-LIB2 script present" if certificate.smt2 else "missing SMT-LIB2 script",
-        )
-    )
+    smt_present = "(check-sat)" in certificate.smt2 and "(set-logic" in certificate.smt2
+    checks.append(CertificateCheck("smt2", smt_present, "SMT-LIB2 script present" if smt_present else "missing/invalid SMT-LIB2 script"))
 
     spec = None
     if certificate.spec_payload is None:
@@ -626,7 +647,7 @@ def verify_certificate(
                 )
             )
 
-    report: Optional[VerificationReport] = None
+    report: VerificationReport | None = None
     if spec is not None:
         try:
             # No derivation filling: the certificate must carry every value it claims.
@@ -645,6 +666,23 @@ def verify_certificate(
             )
             if not constraints_ok:
                 errors.extend(report.relaxation or [report.summary_line()])
+            try:
+                expected_smt, coverage = render_smt2_with_coverage(spec, certificate.witness)
+                smt_bound = hmac.compare_digest(expected_smt, certificate.smt2)
+                smt_bound = smt_bound and hmac.compare_digest(sha256_hex(certificate.smt2), certificate.smt2_sha256 or "")
+                coverage_bound = (certificate.smt2_complete == coverage["complete"] and
+                                  _plain_data(certificate.smt2_omitted) == _plain_data(coverage["omitted"]))
+                checks.append(CertificateCheck("smt2_coverage", coverage_bound,
+                                               "complete SMT export" if coverage["complete"] else
+                                               f"SMT export omits {len(coverage['omitted'])} constraint(s); VIR verification remains authoritative"))
+            except Exception as exc:
+                smt_bound = False
+                errors.append(f"cannot re-render SMT binding: {exc}")
+            checks.append(CertificateCheck("smt2_binding", smt_bound,
+                                           "SMT script is bound to the embedded spec and witness" if smt_bound else "SMT script does not match spec/witness"))
+            portable = bool(getattr(spec, "portable_model", False))
+            checks.append(CertificateCheck("portable_model", portable or expected_spec is not None,
+                                           "structural schema is portable" if portable else "non-portable validators require expected_spec"))
 
     if expected_spec is not None:
         try:
@@ -658,6 +696,11 @@ def verify_certificate(
                     "certificate matches the supplied spec" if bound else "certificate was produced for a different spec",
                 )
             )
+            if bound and not getattr(live_spec, "portable_model", False):
+                live_report = verify_values(live_spec, certificate.witness, derive_missing=False)
+                checks.append(CertificateCheck("live_validators", live_report.ok, live_report.summary_line()))
+                if not live_report.ok:
+                    errors.append("trusted live validators rejected the witness")
         except Exception as exc:
             checks.append(CertificateCheck("expected_spec", False, str(exc)))
 
@@ -673,9 +716,9 @@ def build_certificate(
     schema_or_spec: Any,
     values: Mapping[str, Any],
     *,
-    metadata: Optional[Mapping[str, Any]] = None,
+    metadata: Mapping[str, Any] | None = None,
     require_valid: bool = True,
-    extra_fields: Optional[Mapping[str, Any]] = None,
+    extra_fields: Mapping[str, Any] | None = None,
 ) -> ProofCertificate:
     """Build a sealed certificate for a concrete instance."""
 
@@ -686,13 +729,16 @@ def build_certificate(
     witness = dict(report.values if report.status == "PASS" else values)
     if extra_fields:
         witness.update(dict(extra_fields))
+    smt2, coverage = render_smt2_with_coverage(spec, witness)
     certificate = ProofCertificate(
         version=CERTIFICATE_VERSION,
         spec_sha256=spec_digest(spec),
-        smt2=render_smt2(spec, witness),
+        smt2=smt2,
         witness=witness,
         spec_payload=spec_to_dict(spec),
         metadata=dict(metadata or {}),
+        smt2_complete=coverage["complete"],
+        smt2_omitted=coverage["omitted"],
     )
     return certificate.seal()
 
@@ -705,9 +751,9 @@ def build_certificate(
 class VerifiedResult(Generic[T]):
     value: T
     reasoning: str = ""
-    proof: Optional[ProofCertificate] = None
-    telemetry: Dict[str, Any] = field(default_factory=dict)
-    report: Optional[VerificationReport] = None
+    proof: ProofCertificate | None = None
+    telemetry: dict[str, Any] = field(default_factory=dict)
+    report: VerificationReport | None = None
     raw: str = ""
     spec_name: str = ""
 
@@ -715,7 +761,7 @@ class VerifiedResult(Generic[T]):
     def ok(self) -> bool:
         return self.report is None or self.report.status == "PASS"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "value": self.value,
             "reasoning": self.reasoning,
@@ -742,5 +788,6 @@ __all__ = [
     "VerifiedResult",
     "build_certificate",
     "render_smt2",
+    "render_smt2_with_coverage",
     "verify_certificate",
 ]

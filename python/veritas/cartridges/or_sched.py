@@ -8,8 +8,8 @@ schedule either satisfies every constraint or reports exactly which one failed.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 class SchedulingError(ValueError):
@@ -20,11 +20,11 @@ class SchedulingError(ValueError):
 class Task:
     name: str
     duration: float = 1.0
-    predecessors: List[str] = field(default_factory=list)
-    resource: Optional[str] = None
+    predecessors: list[str] = field(default_factory=list)
+    resource: str | None = None
     demand: float = 1.0
     release: float = 0.0
-    deadline: Optional[float] = None
+    deadline: float | None = None
 
     @property
     def end(self) -> float:
@@ -35,16 +35,16 @@ class Task:
 class Violation:
     kind: str
     message: str
-    tasks: List[str] = field(default_factory=list)
+    tasks: list[str] = field(default_factory=list)
 
-    def as_dict(self) -> Dict[str, object]:
+    def as_dict(self) -> dict[str, object]:
         return {"kind": self.kind, "message": self.message, "tasks": list(self.tasks)}
 
 
 class SchedulingProblem:
-    def __init__(self, horizon: Optional[float] = None):
-        self.tasks: Dict[str, Task] = {}
-        self.capacities: Dict[str, float] = {}
+    def __init__(self, horizon: float | None = None):
+        self.tasks: dict[str, Task] = {}
+        self.capacities: dict[str, float] = {}
         self.horizon = horizon
 
     # -- construction ----------------------------------------------------
@@ -52,12 +52,12 @@ class SchedulingProblem:
         self,
         name: str,
         duration: float = 1.0,
-        predecessors: Optional[Sequence[str]] = None,
+        predecessors: Sequence[str] | None = None,
         *,
-        resource: Optional[str] = None,
+        resource: str | None = None,
         demand: float = 1.0,
         release: float = 0.0,
-        deadline: Optional[float] = None,
+        deadline: float | None = None,
     ) -> Task:
         if duration < 0:
             raise SchedulingError(f"task {name!r} has negative duration")
@@ -77,11 +77,11 @@ class SchedulingProblem:
         self.tasks[after].predecessors.append(before)
 
     # -- analysis --------------------------------------------------------
-    def topological_order(self) -> List[str]:
-        state: Dict[str, int] = {}
-        order: List[str] = []
+    def topological_order(self) -> list[str]:
+        state: dict[str, int] = {}
+        order: list[str] = []
 
-        def visit(name: str, trail: List[str]) -> None:
+        def visit(name: str, trail: list[str]) -> None:
             mark = state.get(name, 0)
             if mark == 1:
                 raise SchedulingError("precedence cycle: " + " -> ".join(trail + [name]))
@@ -99,8 +99,8 @@ class SchedulingProblem:
             visit(name, [])
         return order
 
-    def earliest_schedule(self) -> Dict[str, float]:
-        starts: Dict[str, float] = {}
+    def earliest_schedule(self) -> dict[str, float]:
+        starts: dict[str, float] = {}
         for name in self.topological_order():
             task = self.tasks[name]
             ready = task.release
@@ -113,23 +113,23 @@ class SchedulingProblem:
         starts = self.earliest_schedule()
         return max((starts[name] + task.duration for name, task in self.tasks.items()), default=0.0)
 
-    def critical_path(self) -> Tuple[float, List[str]]:
+    def critical_path(self) -> tuple[float, list[str]]:
         order = self.topological_order()
-        best: Dict[str, Tuple[float, List[str]]] = {}
+        best: dict[str, tuple[float, list[str]]] = {}
         for name in order:
             task = self.tasks[name]
-            candidates = [(0.0, [])]
+            candidates = [(task.release, [])]
             for predecessor in task.predecessors:
                 candidates.append(best[predecessor])
-            length, path = max(candidates, key=lambda item: item[0])
-            best[name] = (length + task.duration, path + [name])
+            ready, path = max(candidates, key=lambda item: item[0])
+            best[name] = (ready + task.duration, path + [name])
         if not best:
             return 0.0, []
         return max(best.values(), key=lambda item: item[0])
 
     # -- verification ----------------------------------------------------
-    def validate(self, starts: Mapping[str, float]) -> List[Violation]:
-        violations: List[Violation] = []
+    def validate(self, starts: Mapping[str, float]) -> list[Violation]:
+        violations: list[Violation] = []
         missing = set(self.tasks) - set(starts)
         if missing:
             violations.append(Violation("missing", f"no start time for {sorted(missing)}", sorted(missing)))
@@ -158,9 +158,9 @@ class SchedulingProblem:
         violations.extend(self._resource_violations(starts))
         return violations
 
-    def _resource_violations(self, starts: Mapping[str, float]) -> List[Violation]:
-        violations: List[Violation] = []
-        by_resource: Dict[str, List[Tuple[float, float, str, float]]] = {}
+    def _resource_violations(self, starts: Mapping[str, float]) -> list[Violation]:
+        violations: list[Violation] = []
+        by_resource: dict[str, list[tuple[float, float, str, float]]] = {}
         for name, task in self.tasks.items():
             if task.resource is None or name not in starts:
                 continue
@@ -169,7 +169,7 @@ class SchedulingProblem:
             )
         for resource, intervals in by_resource.items():
             capacity = self.capacities.get(resource, float("inf"))
-            points: List[Tuple[float, int, float]] = []
+            points: list[tuple[float, int, float]] = []
             for start, end, _name, demand in intervals:
                 points.append((start, 1, demand))
                 points.append((end, -1, demand))
@@ -194,7 +194,7 @@ class SchedulingProblem:
         except SchedulingError:
             return False
 
-    def solve(self) -> Dict[str, float]:
+    def solve(self) -> dict[str, float]:
         starts = self.earliest_schedule()
         violations = self.validate(starts)
         if violations:
@@ -206,7 +206,7 @@ class SchedulingProblem:
 # stateless helpers kept for compatibility
 # ---------------------------------------------------------------------------
 
-def no_overlap(intervals: Sequence[Tuple[float, float]]) -> bool:
+def no_overlap(intervals: Sequence[tuple[float, float]]) -> bool:
     ordered = sorted(intervals)
     for i in range(1, len(ordered)):
         if ordered[i][0] < ordered[i - 1][1] - 1e-12:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from .vir import VirType
 
@@ -13,16 +13,16 @@ class CircularDerivationError(Exception):
 
 class DependencyGraph:
     def __init__(self):
-        self._name_to_id: Dict[str, int] = {}
-        self._id_to_name: Dict[int, str] = {}
-        self._types: Dict[int, Any] = {}
+        self._name_to_id: dict[str, int] = {}
+        self._id_to_name: dict[int, str] = {}
+        self._types: dict[int, Any] = {}
         self._next_id: int = 0
         # derive rules: target var id -> list of input var ids
-        self._derive_inputs: Dict[int, List[int]] = {}
-        self._derive_exprs: Dict[int, Any] = {}
+        self._derive_inputs: dict[int, list[int]] = {}
+        self._derive_exprs: dict[int, Any] = {}
 
     # ---- variables ----
-    def add_variable(self, name: str, vir_type: Optional[VirType] = None) -> int:
+    def add_variable(self, name: str, vir_type: VirType | None = None) -> int:
         if name in self._name_to_id:
             return self._name_to_id[name]
         vid = self._next_id
@@ -44,15 +44,15 @@ class DependencyGraph:
         return self._types.get(vid)
 
     @property
-    def name_to_id(self) -> Dict[str, int]:
+    def name_to_id(self) -> dict[str, int]:
         return dict(self._name_to_id)
 
     @property
-    def id_to_name(self) -> Dict[int, str]:
+    def id_to_name(self) -> dict[int, str]:
         return dict(self._id_to_name)
 
     # ---- derives ----
-    def add_derive(self, target_name: str, input_names: List[str], expr: Any = None, tol: float = 1e-6) -> None:
+    def add_derive(self, target_name: str, input_names: list[str], expr: Any = None, tol: float = 1e-6) -> None:
         target_id = self.var_id(target_name)
         input_ids = [self.var_id(n) for n in input_names]
         # merge inputs if derive already exists
@@ -62,7 +62,7 @@ class DependencyGraph:
         if expr is not None:
             self._derive_exprs[target_id] = expr
 
-    def derive_inputs(self, target_name: str) -> List[str]:
+    def derive_inputs(self, target_name: str) -> list[str]:
         vid = self._name_to_id.get(target_name)
         if vid is None:
             return []
@@ -73,12 +73,12 @@ class DependencyGraph:
         return vid is not None and vid in self._derive_inputs
 
     # ---- topological order ----
-    def topological_order(self) -> List[str]:
+    def topological_order(self) -> list[str]:
         # nodes: all variables
-        nodes: Set[int] = set(self._id_to_name.keys())
+        nodes: set[int] = set(self._id_to_name.keys())
         # adjacency: input -> target
-        in_degree: Dict[int, int] = {n: 0 for n in nodes}
-        adj: Dict[int, List[int]] = {n: [] for n in nodes}
+        in_degree: dict[int, int] = {n: 0 for n in nodes}
+        adj: dict[int, list[int]] = {n: [] for n in nodes}
         for target_id, inputs in self._derive_inputs.items():
             for inp in inputs:
                 if inp in nodes and target_id in nodes:
@@ -87,7 +87,7 @@ class DependencyGraph:
         # Kahn's algorithm; stable by insertion order of variable ids
         from collections import deque
         q = deque([n for n in sorted(nodes) if in_degree[n] == 0])
-        order: List[int] = []
+        order: list[int] = []
         while q:
             n = q.popleft()
             order.append(n)
@@ -101,7 +101,7 @@ class DependencyGraph:
             )
         return [self._id_to_name[vid] for vid in order]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name_to_id": dict(self._name_to_id),
             "id_to_name": dict(self._id_to_name),

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -20,7 +20,7 @@ class Clause:
     end: int
     complete: bool = True
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {"key": self.key, "value": self.value, "start": self.start, "end": self.end}
 
 
@@ -29,30 +29,30 @@ class ShadowParser:
         self.language = language
         self.buffer = ""
         self.depth = 0
-        self.completed_clauses: List[Clause] = []
+        self.completed_clauses: list[Clause] = []
         self._reported = 0
-        self._current_key: Optional[str] = None
+        self._current_key: str | None = None
         self._key_start = 0
 
     # -- incremental feeding -------------------------------------------
-    def feed_bytes(self, data: bytes | str, token_idx: int = 0, entropy: float = 0.0) -> List[Clause]:
+    def feed_bytes(self, data: bytes | str, token_idx: int = 0, entropy: float = 0.0) -> list[Clause]:
         text = data.decode("utf-8", "replace") if isinstance(data, (bytes, bytearray)) else str(data)
         self.buffer += text
         return self._scan()
 
-    def _scan(self) -> List[Clause]:
+    def _scan(self) -> list[Clause]:
         clauses, current_key, key_start = _extract_top_level(self.buffer)
         self.depth = _depth(self.buffer)
         self._current_key = current_key
         self._key_start = key_start
-        newly: List[Clause] = []
+        newly: list[Clause] = []
         for clause in clauses[self._reported:]:
             self.completed_clauses.append(clause)
             newly.append(clause)
         self._reported = len(clauses)
         return newly
 
-    def current_semantic_slot(self) -> Optional[str]:
+    def current_semantic_slot(self) -> str | None:
         return self._current_key
 
     def current_key_span(self) -> tuple:
@@ -75,7 +75,7 @@ class ShadowParser:
         self._current_key = None
         self._key_start = 0
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "language": self.language,
             "depth": self.depth,
@@ -110,13 +110,13 @@ def _depth(text: str) -> int:
 def _extract_top_level(text: str) -> tuple:
     """Return ``(completed clauses, current key, key start)`` for a JSON object prefix."""
 
-    clauses: List[Clause] = []
+    clauses: list[Clause] = []
     i = 0
     n = len(text)
     depth = 0
     in_string = False
     escape = False
-    current_key: Optional[str] = None
+    current_key: str | None = None
     key_start = 0
     value_start = -1
     awaiting_colon = False

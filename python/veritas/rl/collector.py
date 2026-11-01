@@ -16,24 +16,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import time
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any
 
 
 @dataclass
 class ConflictBranchRecord:
-    prefix_tokens: List[Any] = field(default_factory=list)
-    rejected_clause_tokens: List[Any] = field(default_factory=list)
-    unsat_core_ids: List[Any] = field(default_factory=list)
+    prefix_tokens: list[Any] = field(default_factory=list)
+    rejected_clause_tokens: list[Any] = field(default_factory=list)
+    unsat_core_ids: list[Any] = field(default_factory=list)
     violation_margin: float = 0.0
     prompt: str = ""
     chosen: str = ""
     rejected: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "prefix_tokens": list(self.prefix_tokens),
             "rejected_clause_tokens": list(self.rejected_clause_tokens),
@@ -50,14 +53,14 @@ class ConflictBranchRecord:
 class StepRecord:
     prompt: str
     completion: str
-    rewards: List[float] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    rewards: list[float] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def reward(self) -> float:
         return float(sum(self.rewards)) if self.rewards else 0.0
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "prompt": self.prompt,
             "completion": self.completion,
@@ -69,21 +72,21 @@ class StepRecord:
 
 class VeritasRLCollector:
     def __init__(self):
-        self.records: List[ConflictBranchRecord] = []
-        self.steps: List[StepRecord] = []
+        self.records: list[ConflictBranchRecord] = []
+        self.steps: list[StepRecord] = []
 
     # -- recording -------------------------------------------------------
     def record_conflict_branch(
         self,
         state: Any = None,
         clause: Any = None,
-        core_nodes: Optional[Sequence[Any]] = None,
+        core_nodes: Sequence[Any] | None = None,
         *,
-        record: Optional[ConflictBranchRecord] = None,
+        record: ConflictBranchRecord | None = None,
         prompt: str = "",
         rejected: str = "",
         margin: float = 0.0,
-        metadata: Optional[Mapping[str, Any]] = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> ConflictBranchRecord:
         if record is None:
             record = ConflictBranchRecord(
@@ -114,9 +117,9 @@ class VeritasRLCollector:
         chosen: str,
         rejected: str,
         *,
-        unsat_core: Optional[Sequence[Any]] = None,
+        unsat_core: Sequence[Any] | None = None,
         margin: float = 0.0,
-        metadata: Optional[Mapping[str, Any]] = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> ConflictBranchRecord:
         record = ConflictBranchRecord(
             prompt=prompt,
@@ -143,7 +146,7 @@ class VeritasRLCollector:
         jump_forward_tokens: int = 0,
         final_margin: float = 0.0,
         max_backtracks: int = 8,
-    ) -> List[float]:
+    ) -> list[float]:
         """Dense process rewards: verified completion + efficiency shaping."""
 
         terminal = 1.0 if verified else -1.0
@@ -157,12 +160,14 @@ class VeritasRLCollector:
         ]
 
     # -- exports ---------------------------------------------------------
-    def export_step_dpo(self, path: str = "traces/") -> Dict[str, Any]:
+    def export_step_dpo(self, path: str = "traces/") -> dict[str, Any]:
         directory = Path(path)
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / "step_dpo.jsonl"
         rows = []
         for record in self.records:
+            if not (record.prompt and record.chosen and record.rejected) or record.chosen == record.rejected:
+                continue
             rows.append(
                 {
                     "prompt": record.prompt,
@@ -187,7 +192,7 @@ class VeritasRLCollector:
             "manifest": manifest,
         }
 
-    def export_grpo(self, path: str = "traces/") -> Dict[str, Any]:
+    def export_grpo(self, path: str = "traces/") -> dict[str, Any]:
         directory = Path(path)
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / "process_grpo.jsonl"
@@ -203,7 +208,7 @@ class VeritasRLCollector:
             "manifest": manifest,
         }
 
-    def to_hf_dataset(self, kind: str = "dpo") -> Dict[str, Any]:
+    def to_hf_dataset(self, kind: str = "dpo") -> dict[str, Any]:
         """Return a datasets-compatible payload without importing ``datasets``."""
 
         if kind == "grpo":
@@ -218,11 +223,11 @@ class VeritasRLCollector:
                     "metadata": record.as_dict(),
                 }
                 for record in self.records
-                if record.chosen or record.rejected
+                if record.prompt and record.chosen and record.rejected and record.chosen != record.rejected
             ],
         }
 
-    def _manifest(self, directory: Path, payload: Dict[str, Any]) -> str:
+    def _manifest(self, directory: Path, payload: dict[str, Any]) -> str:
         manifest = {
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "conflicts": len(self.records),
@@ -230,7 +235,7 @@ class VeritasRLCollector:
             **payload,
         }
         target = directory / "manifest.json"
-        target.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        _atomic_write(target, json.dumps(manifest, indent=2, sort_keys=True))
         return str(target)
 
     def clear(self) -> None:
@@ -238,19 +243,32 @@ class VeritasRLCollector:
         self.steps.clear()
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> str:
     digest = hashlib.sha256()
-    count = 0
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            line = json.dumps(row, sort_keys=True, default=str)
-            handle.write(line + "\n")
-            digest.update((line + "\n").encode("utf-8"))
-            count += 1
+    lines = []
+    for row in rows:
+        line = json.dumps(row, sort_keys=True, default=str)
+        lines.append(line + "\n")
+        digest.update((line + "\n").encode("utf-8"))
+    _atomic_write(path, "".join(lines))
     return digest.hexdigest()
 
 
-def export_step_dpo(path: str = "traces/") -> Dict[str, Any]:
+def export_step_dpo(path: str = "traces/") -> dict[str, Any]:
     return VeritasRLCollector().export_step_dpo(path)
 
 
