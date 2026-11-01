@@ -1,0 +1,22 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -e ".[dev,z3]"
+      - run: ruff check python tests benchmarks
+      - run: pytest tests/
+      - run: python -m build --wheel -o dist
+      - run: python -m pip install --force-reinstall --no-deps dist/*.whl
+      - run: veritas --help

@@ -8,7 +8,6 @@ import pytest
 from pydantic import BaseModel
 
 import veritas as vt
-
 from veritas.bridges.async_stream_proxy import AsyncStreamSupervisor, StreamViolation
 from veritas.bridges.diffusion_bridge import DiffusionBridge, gumbel_max_sample, unmask_order
 from veritas.bridges.hf_transformers import VeritasLogitsProcessor
@@ -56,8 +55,13 @@ def test_hf_processor_masks_invalid_tokens_and_allows_eos():
     assert scores[5] == float("-inf")  # 'x'
     assert scores[6] == float("-inf")  # EOS before completion
 
+    # Schema-aware masking blocks EOS until all required fields are present.
+    partial = [1.0] * 7
+    processor([0, 1, 2, 3, 4], partial)  # {"a": 1}
+    assert partial[6] == float("-inf")
+    grammar_only = VeritasLogitsProcessor(tokenizer, spec=None)
     done = [1.0] * 7
-    processor([0, 1, 2, 3, 4], done)  # {"a": 1}
+    grammar_only([0, 1, 2, 3, 4], done)  # {"a": 1}
     assert done[6] == 1.0
     assert processor.verify('{"a": 0.25, "b": 0.75}').status == "PASS"
 

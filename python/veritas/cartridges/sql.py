@@ -16,8 +16,9 @@ warnings, never silently accepted as verified).
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any
 
 _TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?|\d+(?:\.\d+)?|[(),;.*=<>!]+"
@@ -50,19 +51,19 @@ class ForeignKey:
 
 @dataclass
 class SqlCatalog:
-    tables: Dict[str, List[str]] = field(default_factory=dict)
-    foreign_keys: List[ForeignKey] = field(default_factory=list)
+    tables: dict[str, list[str]] = field(default_factory=dict)
+    foreign_keys: list[ForeignKey] = field(default_factory=list)
     tenant_column: str = "tenant_id"
     require_tenant: bool = False
 
-    def columns(self, table: str) -> Optional[List[str]]:
+    def columns(self, table: str) -> list[str] | None:
         requested = table.split(".")[-1].lower()
         for name, cols in self.tables.items():
             if name.lower() == requested:
                 return list(cols)
         return None
 
-    def canonical(self, table: str) -> Optional[str]:
+    def canonical(self, table: str) -> str | None:
         requested = table.split(".")[-1].lower()
         for name in self.tables:
             if name.lower() == requested:
@@ -73,13 +74,13 @@ class SqlCatalog:
 @dataclass
 class SqlVerification:
     ok: bool
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    tables: List[str] = field(default_factory=list)
-    columns: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    tables: list[str] = field(default_factory=list)
+    columns: list[str] = field(default_factory=list)
     has_tenant_filter: bool = False
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
             "errors": list(self.errors),
@@ -98,7 +99,7 @@ def _strip_comments_and_strings(sql: str) -> str:
     return sql
 
 
-def tokenize(sql: str) -> List[str]:
+def tokenize(sql: str) -> list[str]:
     return _TOKEN_RE.findall(_strip_comments_and_strings(sql))
 
 
@@ -107,7 +108,7 @@ def _lname(token: str) -> str:
 
 
 class SqlVerifier:
-    def __init__(self, catalog: Any = None, *, read_only: bool = True, require_tenant: Optional[bool] = None):
+    def __init__(self, catalog: Any = None, *, read_only: bool = True, require_tenant: bool | None = None):
         if isinstance(catalog, SqlCatalog):
             self.catalog = catalog
         else:
@@ -115,7 +116,7 @@ class SqlVerifier:
         if require_tenant is not None:
             self.catalog.require_tenant = require_tenant
         self.read_only = read_only
-        self.aliases: Dict[str, str] = {}
+        self.aliases: dict[str, str] = {}
 
     # -- legacy surface --------------------------------------------------
     def valid_table(self, name: str) -> bool:
@@ -136,152 +137,146 @@ class SqlVerifier:
             return any(fk.matches(t1, c1, t2, c2) for fk in self.catalog.foreign_keys)
         return self.valid_column(t1, c1) and self.valid_column(t2, c2)
 
-    def tenant_isolation_ok(self, predicate: str, tenant_col: Optional[str] = None) -> bool:
+    def tenant_isolation_ok(self, predicate: str, tenant_col: str | None = None) -> bool:
         column = (tenant_col or self.catalog.tenant_column).lower()
         return column in predicate.lower()
 
     # -- verification ----------------------------------------------------
     def verify(self, sql: str) -> SqlVerification:
-        errors: List[str] = []
-        warnings: List[str] = []
-        tokens = tokenize(sql)
-        if not tokens:
-            return SqlVerification(False, ["empty SQL statement"])
-        head = tokens[0].upper()
-        if self.read_only and (head in _WRITE_KEYWORDS or any(t.upper() in _WRITE_KEYWORDS for t in tokens[:3])):
-            errors.append(f"read-only pipeline rejected a `{head}` statement")
+        """AST-backed verification of a single read-only SELECT subset.
 
-        scope: Dict[str, str] = {}
-        tables_seen: List[str] = []
-        columns_seen: List[str] = []
-        has_tenant = False
+        Uses sqlglot when available; otherwise fails closed. Tenant isolation must be a
+        top-level conjunctive equality on the tenant column, not a substring or an OR
+        branch. Multiple statements, writes, subqueries and set operations are rejected.
+        """
+        errors: list[str] = []
+        warnings: list[str] = []
+        try:
+            import sqlglot
+            from sqlglot import expressions as exp
+        except Exception:
+            return SqlVerification(False, ["sqlglot is required for SQL verification; install veritas-ai[sql]"])
+        try:
+            statements = sqlglot.parse(sql)
+        except Exception as exc:
+            return SqlVerification(False, [f"SQL parse error: {exc}"])
+        statements = [st for st in statements if st is not None]
+        if len(statements) != 1:
+            return SqlVerification(False, ["expected exactly one SQL statement"])
+        tree = statements[0]
+        if not isinstance(tree, exp.Select):
+            if self.read_only:
+                errors.append(f"read-only pipeline rejected a `{tree.key.upper()}` statement")
+            else:
+                errors.append("only SELECT statements are supported by this verifier")
+            return SqlVerification(False, errors, warnings)
+        if tree.find(exp.Union) or tree.find(exp.Subquery) or tree.find(exp.With):
+            errors.append("subqueries, CTEs and set operations are not supported by this verifier")
+        if self.read_only and tree.find(exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Alter, exp.Create):
+            errors.append("read-only pipeline rejected a write/DDL expression")
 
-        upper = [t.upper() for t in tokens]
-        from_index = next((i for i, t in enumerate(upper) if t == "FROM"), None)
-        if from_index is None:
+        scope: dict[str, str] = {}
+        tables_seen: list[str] = []
+        columns_seen: list[str] = []
+
+        def register_table(table: exp.Table) -> str | None:
+            name = table.name
+            canonical = self.catalog.canonical(name)
+            if canonical is None:
+                errors.append(f"unknown table `{name}`")
+                return None
+            alias = table.alias or canonical
+            scope[alias.lower()] = canonical
+            scope[canonical.lower()] = canonical
+            tables_seen.append(canonical)
+            return canonical
+
+        from_clause = tree.args.get("from") or tree.args.get("from_")
+        if from_clause is None:
             errors.append("query has no FROM clause")
             return SqlVerification(False, errors, warnings)
-
-        # --- table references and aliases --------------------------------
-        table_tokens: List[Tuple[str, Optional[str]]] = []
-        joins: List[int] = [from_index] + [i for i, t in enumerate(upper) if t == "JOIN"]
-        for index in joins:
-            cursor = index + 1
-            while cursor < len(tokens) and upper[cursor] in {"INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS"}:
-                cursor += 1
-            if cursor >= len(tokens):
-                errors.append("dangling JOIN/FROM without a table")
-                continue
-            table = tokens[cursor]
-            if table == "(":
-                errors.append("subqueries are not supported by this verifier")
-                continue
-            canonical = self.catalog.canonical(table)
-            if canonical is None:
-                errors.append(f"unknown table `{table}`")
-                continue
-            table_tokens.append((canonical, None))
-            tables_seen.append(canonical)
-            # optional alias
-            alias = canonical
-            next_index = cursor + 1
-            if next_index < len(tokens) and upper[next_index] == "AS":
-                next_index += 1
-            if next_index < len(tokens) and upper[next_index] not in _KEYWORDS and tokens[next_index] != "(":
-                alias = tokens[next_index]
-            scope[alias.lower()] = canonical
-            if alias != canonical:
-                scope[canonical.lower()] = canonical
-        if not table_tokens:
+        for table in from_clause.find_all(exp.Table):
+            register_table(table)
+        joins = list(tree.find_all(exp.Join))
+        for join in joins:
+            for table in join.find_all(exp.Table):
+                register_table(table)
+        if not tables_seen:
             return SqlVerification(False, errors or ["no resolvable tables"], warnings)
 
-        def resolve_column(reference: str) -> Optional[Tuple[str, str]]:
-            if "." in reference:
-                alias, _, column = reference.partition(".")
-                table = scope.get(alias.lower())
+        def resolve_column(col: exp.Column) -> tuple[str, str] | None:
+            column = col.name
+            if col.table:
+                table = scope.get(col.table.lower())
                 if table is None:
-                    errors.append(f"unknown table alias `{alias}`")
+                    errors.append(f"unknown table alias `{col.table}`")
                     return None
-                if not self.valid_column(table, column):
-                    errors.append(f"unknown column `{table}.{column}`")
+            else:
+                matches = [t for t in set(scope.values()) if self.valid_column(t, column)]
+                if len(matches) != 1:
+                    errors.append(f"unknown or ambiguous unqualified column `{column}`")
                     return None
-                return table, column
-            for table in set(scope.values()):
-                if self.valid_column(table, reference):
-                    return table, reference
-            errors.append(f"unknown unqualified column `{reference}`")
-            return None
+                table = matches[0]
+            if not self.valid_column(table, column):
+                errors.append(f"unknown column `{table}.{column}`")
+                return None
+            return table, column
 
-        # --- SELECT list --------------------------------------------------
-        select_tokens = tokens[1:from_index]
-        if select_tokens:
-            for piece in _split_commas(select_tokens):
-                if any("*" in token for token in piece):
-                    continue
-                if any(token.upper() == "CASE" for token in piece):
-                    warnings.append("CASE expression was not column-verified")
-                    continue
-                # strip an output alias (`... AS name`)
-                alias_cut = next(
-                    (i for i, token in enumerate(piece) if token.upper() == "AS"), len(piece)
-                )
-                expression = piece[:alias_cut]
-                identifiers = [
-                    (i, token) for i, token in enumerate(expression)
-                    if re.match(r"^[A-Za-z_]", token) and token.upper() not in _KEYWORDS
-                ]
-                # drop function names: an identifier immediately followed by `(`
-                identifiers = [
-                    (i, token) for i, token in identifiers
-                    if not (i + 1 < len(expression) and expression[i + 1] == "(")
-                ]
-                if not identifiers:
-                    continue
-                reference = identifiers[-1][1]
-                resolved = resolve_column(reference)
-                if resolved:
-                    columns_seen.append(f"{resolved[0]}.{resolved[1]}")
+        for col in tree.find_all(exp.Column):
+            if col.name == "*" or isinstance(col.this, exp.Star):
+                if col.table and col.table.lower() not in scope:
+                    errors.append(f"unknown table alias `{col.table}`")
+                continue
+            # Columns inside tenant predicates are validated too.
+            resolved = resolve_column(col)
+            if resolved and col.parent and isinstance(col.parent, exp.Dot):
+                continue
+            if resolved:
+                columns_seen.append(f"{resolved[0]}.{resolved[1]}")
+        for star in tree.find_all(exp.Star):
+            parent = star.parent
+            if isinstance(parent, exp.Column) and parent.table:
+                if parent.table.lower() not in scope:
+                    errors.append(f"unknown table alias `{parent.table}`")
 
-        # --- joins + FK validity -----------------------------------------
-        fk_candidates: List[Tuple[str, str, str, str]] = []
-        for index, token in enumerate(tokens):
-            if token.upper() != "ON":
+        fk_candidates: list[tuple[str, str, str, str]] = []
+        for join in joins:
+            on = join.args.get("on")
+            if on is None:
+                warnings.append("JOIN without an ON predicate")
                 continue
-            segment = _until_keyword(tokens[index + 1:])
-            found = _extract_equalities(segment)
-            if not found:
-                warnings.append("JOIN without a recognisable equality predicate")
-                continue
-            for left, right in found:
-                l_res = resolve_column(left)
-                r_res = resolve_column(right)
-                if l_res and r_res:
-                    fk_candidates.append((l_res[0], l_res[1], r_res[0], r_res[1]))
+            for eq in on.find_all(exp.EQ):
+                left, right = eq.left, eq.right
+                if isinstance(left, exp.Column) and isinstance(right, exp.Column):
+                    l_res, r_res = resolve_column(left), resolve_column(right)
+                    if l_res and r_res:
+                        fk_candidates.append((l_res[0], l_res[1], r_res[0], r_res[1]))
         if self.catalog.foreign_keys:
             for t1, c1, t2, c2 in fk_candidates:
                 if not any(fk.matches(t1, c1, t2, c2) for fk in self.catalog.foreign_keys):
-                    errors.append(
-                        f"join `{t1}.{c1} = {t2}.{c2}` does not follow any declared foreign key"
-                    )
+                    errors.append(f"join `{t1}.{c1} = {t2}.{c2}` does not follow any declared foreign key")
 
-        # --- tenant isolation -------------------------------------------
         tenant = self.catalog.tenant_column.lower()
-        has_tenant = any(tenant in t.lower() for t in tokens)
+        where = tree.args.get("where")
+        has_tenant = False
+        def conjuncts(node):
+            if isinstance(node, exp.And):
+                yield from conjuncts(node.left)
+                yield from conjuncts(node.right)
+            else:
+                yield node
+        if where is not None:
+            for part in conjuncts(where.this):
+                if not isinstance(part, exp.EQ):
+                    continue
+                cols = [c for c in (part.left, part.right) if isinstance(c, exp.Column)]
+                literals = [v for v in (part.left, part.right) if isinstance(v, (exp.Literal, exp.Placeholder, exp.Parameter))]
+                if len(cols) == 1 and len(literals) == 1 and cols[0].name.lower() == tenant:
+                    resolved = resolve_column(cols[0])
+                    if resolved:
+                        has_tenant = True
         if self.catalog.require_tenant and not has_tenant:
-            errors.append(f"missing required tenant-isolation predicate on `{self.catalog.tenant_column}`")
-
-        # --- group by / order by columns ---------------------------------
-        for keyword in ("GROUP", "ORDER"):
-            if keyword in upper:
-                index = upper.index(keyword)
-                if index + 1 < len(tokens) and upper[index + 1] == "BY":
-                    for piece in _split_commas(tokens[index + 2:]):
-                        for token in piece:
-                            if re.match(r"^[A-Za-z_]", token) and token.upper() not in _KEYWORDS:
-                                if "." in token or any(
-                                    self.valid_column(table, token) for table in set(scope.values())
-                                ):
-                                    resolve_column(token)
+            errors.append(f"missing required conjunctive tenant-isolation predicate on `{self.catalog.tenant_column}`")
 
         return SqlVerification(
             ok=not errors,
@@ -293,8 +288,8 @@ class SqlVerifier:
         )
 
 
-def _split_commas(tokens: Sequence[str]) -> List[List[str]]:
-    parts: List[List[str]] = [[]]
+def _split_commas(tokens: Sequence[str]) -> list[list[str]]:
+    parts: list[list[str]] = [[]]
     depth = 0
     for token in tokens:
         if token == "(":
@@ -308,8 +303,8 @@ def _split_commas(tokens: Sequence[str]) -> List[List[str]]:
     return [part for part in parts if part]
 
 
-def _until_keyword(tokens: Sequence[str]) -> List[str]:
-    out: List[str] = []
+def _until_keyword(tokens: Sequence[str]) -> list[str]:
+    out: list[str] = []
     depth = 0
     for token in tokens:
         upper = token.upper()
@@ -325,8 +320,8 @@ def _until_keyword(tokens: Sequence[str]) -> List[str]:
     return out
 
 
-def _extract_equalities(tokens: Sequence[str]) -> List[Tuple[str, str]]:
-    out: List[Tuple[str, str]] = []
+def _extract_equalities(tokens: Sequence[str]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
     for index, token in enumerate(tokens):
         if token != "=":
             continue

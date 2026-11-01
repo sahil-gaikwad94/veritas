@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
 NoiseId = int
 
@@ -22,8 +23,8 @@ class Interval:
     lo: float = float("-inf")
     hi: float = float("inf")
 
-    EMPTY: "Interval" = None  # placeholder filled below
-    ENTIRE: "Interval" = None
+    EMPTY: Interval = None  # placeholder filled below
+    ENTIRE: Interval = None
 
     def __post_init__(self):
         if self.lo is None:
@@ -36,11 +37,11 @@ class Interval:
             pass
 
     @classmethod
-    def empty(cls) -> "Interval":
+    def empty(cls) -> Interval:
         return cls(float("inf"), float("-inf"))
 
     @classmethod
-    def entire(cls) -> "Interval":
+    def entire(cls) -> Interval:
         return cls(float("-inf"), float("inf"))
 
     def is_empty(self) -> bool:
@@ -54,12 +55,12 @@ class Interval:
         hi = self.hi if math.isfinite(self.hi) else 1e300
         return max(0.0, hi - lo)
 
-    def intersect(self, other: "Interval") -> "Interval":
+    def intersect(self, other: Interval) -> Interval:
         lo = max(self.lo, other.lo)
         hi = min(self.hi, other.hi)
         return Interval(lo, hi)
 
-    def union(self, other: "Interval") -> "Interval":
+    def union(self, other: Interval) -> Interval:
         if self.is_empty():
             return Interval(other.lo, other.hi)
         if other.is_empty():
@@ -67,34 +68,37 @@ class Interval:
         return Interval(min(self.lo, other.lo), max(self.hi, other.hi))
 
     # ---- outward-rounded operations ----
-    def add(self, other: "Interval") -> "Interval":
+    def add(self, other: Interval) -> Interval:
         return Interval(_next_down(self.lo + other.lo), _next_up(self.hi + other.hi))
 
-    def sub(self, other: "Interval") -> "Interval":
+    def sub(self, other: Interval) -> Interval:
         return Interval(_next_down(self.lo - other.hi), _next_up(self.hi - other.lo))
 
-    def mul(self, other: "Interval") -> "Interval":
-        products = (self.lo * other.lo, self.lo * other.hi, self.hi * other.lo, self.hi * other.hi)
+    def mul(self, other: Interval) -> Interval:
+        if self.is_empty() or other.is_empty():
+            return Interval.empty()
+        if (self.lo == self.hi == 0) or (other.lo == other.hi == 0):
+            return Interval(0.0, 0.0)
+        def prod(a, b):
+            if a == 0 or b == 0:
+                return 0.0
+            return a * b
+        products = (prod(self.lo, other.lo), prod(self.lo, other.hi), prod(self.hi, other.lo), prod(self.hi, other.hi))
         return Interval(_next_down(min(products)), _next_up(max(products)))
 
-    def div(self, other: "Interval") -> "Interval":
-        # interval division; if divisor contains 0, return entire-ish union
-        if other.lo <= 0 <= other.hi:
-            # split
-            left = Interval(self.lo, self.hi).div(Interval(other.lo, 0)) if other.lo < 0 else None
-            right = Interval(self.lo, self.hi).div(Interval(0, other.hi)) if other.hi > 0 else None
-            if left is not None and right is not None:
-                return left.union(right)
-            if left is not None:
-                return left
-            if right is not None:
-                return right
+    def div(self, other: Interval) -> Interval:
+        if self.is_empty() or other.is_empty():
             return Interval.empty()
-        # standard
+        if other.lo <= 0 <= other.hi:
+            if self.lo == self.hi == 0:
+                return Interval(0.0, 0.0)
+            # The divisor straddles zero; the quotient is unbounded. This is a sound
+            # over-approximation, not a split that silently drops the pole.
+            return Interval.entire()
         vals = (self.lo / other.lo, self.lo / other.hi, self.hi / other.lo, self.hi / other.hi)
         return Interval(_next_down(min(vals)), _next_up(max(vals)))
 
-    def sqr(self) -> "Interval":
+    def sqr(self) -> Interval:
         if self.lo >= 0:
             return Interval(_next_down(self.lo * self.lo), _next_up(self.hi * self.hi))
         if self.hi <= 0:
@@ -102,7 +106,7 @@ class Interval:
         m = max(abs(self.lo), abs(self.hi))
         return Interval(0.0, _next_up(m * m))
 
-    def sqrt(self) -> "Interval":
+    def sqrt(self) -> Interval:
         if self.hi < 0:
             return Interval.empty()
         lo = 0.0 if self.lo < 0 else math.sqrt(max(0.0, self.lo))
@@ -111,7 +115,7 @@ class Interval:
 
     # ---- numeric prefix parsing (from blueprint) ----
     @staticmethod
-    def from_numeric_prefix(raw_candidate, domain_bounds, allow_exp: bool = False) -> "Interval":
+    def from_numeric_prefix(raw_candidate, domain_bounds, allow_exp: bool = False) -> Interval:
         if not isinstance(domain_bounds, Interval):
             try:
                 domain_bounds = Interval(domain_bounds[0], domain_bounds[1])
@@ -228,11 +232,11 @@ Interval.ENTIRE = Interval.entire()
 @dataclass
 class AffineForm:
     center: float = 0.0
-    terms: List[Tuple[NoiseId, float]] = field(default_factory=list)
+    terms: list[tuple[NoiseId, float]] = field(default_factory=list)
     err_radius: float = 0.0
 
-    def _combine(self, other_terms: Sequence[Tuple[NoiseId, float]]) -> List[Tuple[NoiseId, float]]:
-        mapping: Dict[NoiseId, float] = {}
+    def _combine(self, other_terms: Sequence[tuple[NoiseId, float]]) -> list[tuple[NoiseId, float]]:
+        mapping: dict[NoiseId, float] = {}
         for nid, coeff in self.terms + list(other_terms):
             mapping[nid] = mapping.get(nid, 0.0) + coeff
         # drop near-zero
@@ -242,14 +246,14 @@ class AffineForm:
         l1 = sum(abs(c) for _, c in self.terms) + self.err_radius
         return Interval(self.center - l1, self.center + l1)
 
-    def add(self, other: "AffineForm") -> "AffineForm":
+    def add(self, other: AffineForm) -> AffineForm:
         return AffineForm(
             center=self.center + other.center,
             terms=self._combine(other.terms),
             err_radius=self.err_radius + other.err_radius,
         )
 
-    def sub(self, other: "AffineForm") -> "AffineForm":
+    def sub(self, other: AffineForm) -> AffineForm:
         neg_terms = [(nid, -c) for nid, c in other.terms]
         return AffineForm(
             center=self.center - other.center,
@@ -257,14 +261,14 @@ class AffineForm:
             err_radius=self.err_radius + other.err_radius,
         )
 
-    def scale(self, scalar: float) -> "AffineForm":
+    def scale(self, scalar: float) -> AffineForm:
         return AffineForm(
             center=self.center * scalar,
             terms=[(nid, c * scalar) for nid, c in self.terms],
             err_radius=self.err_radius * abs(scalar),
         )
 
-    def mul(self, other: "AffineForm") -> "AffineForm":
+    def mul(self, other: AffineForm) -> AffineForm:
         other = other if isinstance(other, AffineForm) else AffineForm.constant(float(other))
         x0 = self.center
         y0 = other.center
@@ -288,7 +292,7 @@ class AffineForm:
     def __sub__(self, other):
         return self.sub(other)
 
-    def intersect_interval(self, iv: Interval) -> "AffineForm":
+    def intersect_interval(self, iv: Interval) -> AffineForm:
         # Convert to interval, intersect, and rebuild a simple affine form (loses correlation)
         new_iv = self.to_interval().intersect(iv)
         if new_iv.is_empty():
@@ -298,13 +302,13 @@ class AffineForm:
         return AffineForm(center=center, terms=[], err_radius=radius)
 
     @classmethod
-    def from_interval(cls, iv: Interval, noise_id: NoiseId = 0) -> "AffineForm":
+    def from_interval(cls, iv: Interval, noise_id: NoiseId = 0) -> AffineForm:
         center = (iv.lo + iv.hi) / 2.0
         radius = (iv.hi - iv.lo) / 2.0
         return cls(center=center, terms=[(noise_id, radius)], err_radius=0.0)
 
     @classmethod
-    def constant(cls, value: float) -> "AffineForm":
+    def constant(cls, value: float) -> AffineForm:
         return cls(center=value, terms=[], err_radius=0.0)
 
 
@@ -326,39 +330,40 @@ class ResidualAccumulator:
         r = self.residual(current_sum)
         m_min = max(0, self.min_remaining - emitted_count)
         m_max = self.max_remaining - emitted_count
-        if m_max < 0:
+        if m_max < m_min:
             return False
-        for m in range(m_min, m_max + 1):
-            lo = m * self.elem_min
-            hi = m * self.elem_max
-            if lo <= r <= hi:
-                return True
-        return False
+        lo = min(m_min * self.elem_min, m_max * self.elem_min)
+        hi = max(m_min * self.elem_max, m_max * self.elem_max)
+        if self.elem_min <= 0 <= self.elem_max:
+            lo, hi = m_max * self.elem_min, m_max * self.elem_max
+        return lo <= r <= hi
 
     def interval_for_remaining(self, emitted_count: int) -> Interval:
         m_min = max(0, self.min_remaining - emitted_count)
         m_max = self.max_remaining - emitted_count
         if m_max < 0:
             return Interval.empty()
-        lo = m_min * self.elem_min
-        hi = m_max * self.elem_max
+        lo = min(m_min * self.elem_min, m_max * self.elem_min)
+        hi = max(m_min * self.elem_max, m_max * self.elem_max)
+        if self.elem_min <= 0 <= self.elem_max:
+            lo, hi = m_max * self.elem_min, m_max * self.elem_max
         return Interval(lo, hi)
 
 
 class Hc4AffineContractor:
     """Hybrid HC4-Revise + AF2 contractor with volume twist support."""
 
-    def __init__(self, domains: Optional[Dict[Any, Interval]] = None):
-        self.domains: Dict[Any, Interval] = {}
+    def __init__(self, domains: dict[Any, Interval] | None = None):
+        self.domains: dict[Any, Interval] = {}
         if domains:
             for k, v in domains.items():
                 self.domains[k] = v if isinstance(v, Interval) else Interval(v[0], v[1])
-        self.constraints: List[Any] = []
-        self.affine: Dict[Any, AffineForm] = {}
+        self.constraints: list[Any] = []
+        self.affine: dict[Any, AffineForm] = {}
 
     # ---- variable management ----
-    def add_variable(self, var_id: Any, interval: Optional[Interval] = None,
-                     lo: Optional[float] = None, hi: Optional[float] = None) -> None:
+    def add_variable(self, var_id: Any, interval: Interval | None = None,
+                     lo: float | None = None, hi: float | None = None) -> None:
         if interval is None:
             interval = Interval(lo if lo is not None else float("-inf"),
                                 hi if hi is not None else float("inf"))
@@ -481,7 +486,9 @@ class Hc4AffineContractor:
                             cur = self._interval_for_var(vid)
                             inter = cur.intersect(Interval(float("-inf"), hi))
                         else:
-                            lo = (target - o_hi) / c_i
+                            # c_i < 0 flips the inequality; existence over the other
+                            # intervals uses their lower sum, not their upper sum.
+                            lo = (target - o_lo) / c_i
                             cur = self._interval_for_var(vid)
                             inter = cur.intersect(Interval(lo, float("inf")))
                         if inter.is_empty():
@@ -508,7 +515,7 @@ class Hc4AffineContractor:
                             cur = self._interval_for_var(vid)
                             inter = cur.intersect(Interval(lo, float("inf")))
                         else:
-                            hi = (target - o_lo) / c_i
+                            hi = (target - o_hi) / c_i
                             cur = self._interval_for_var(vid)
                             inter = cur.intersect(Interval(float("-inf"), hi))
                         if inter.is_empty():
@@ -522,7 +529,8 @@ class Hc4AffineContractor:
                 return True
 
             if kind in ("quad_form", "quad_form_cholesky"):
-                # no narrowing beyond bounds; skip
+                # Quadratic contraction is not implemented; do not pretend to narrow.
+                # The concrete verifier remains authoritative for these constraints.
                 return True
 
         # dict form
@@ -600,20 +608,15 @@ class Hc4AffineContractor:
         return self.propagate()
 
     def current_log_volume(self) -> float:
-        vol = 1.0
-        for iv in self.domains.values():
-            w = iv.width()
-            if w <= 0:
-                w = 0.0
-            vol *= (w if w > 0 else 1.0)
-        # handle zero
+        total = 0.0
         for iv in self.domains.values():
             if iv.is_empty():
                 return float("-inf")
-        try:
-            return math.log(vol) if vol > 0 else float("-inf")
-        except ValueError:
-            return float("-inf")
+            w = iv.width()
+            if w <= 0:
+                return float("-inf")
+            total += math.log(w)
+        return total
 
     def estimate_log_volume_after(self, var_id: Any, candidate_interval: Interval) -> float:
         # non-mutating
@@ -642,7 +645,7 @@ class Hc4AffineContractor:
     def future_volume_twist(self, var_id: Any, candidate_interval: Any, beta: float = 1.0) -> float:
         return self.compute_numeric_token_twist(var_id, candidate_interval, beta)
 
-    def extract_conflict_core(self, clause: Any = None) -> List[Any]:
+    def extract_conflict_core(self, clause: Any = None) -> list[Any]:
         core = [vid for vid, iv in self.domains.items() if iv.is_empty()]
         if not core and clause is not None:
             core = [clause]
@@ -655,7 +658,7 @@ class Hc4AffineContractor:
         return f"Hc4AffineContractor({self.domains})"
 
 
-def _all_finite_feasible(domains: Dict[Any, Interval]) -> bool:
+def _all_finite_feasible(domains: dict[Any, Interval]) -> bool:
     return not any(iv.is_empty() for iv in domains.values())
 
 

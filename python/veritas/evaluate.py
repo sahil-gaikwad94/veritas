@@ -23,11 +23,12 @@ Design rules
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any
 
 Number = (int, float)
-MISSING = object()
+MISSING = object()  # distinct from a present JSON null
 
 _CMP_SYMBOL = {
     "eq": "==",
@@ -43,7 +44,7 @@ _CMP_SYMBOL = {
 # coercion helpers
 # ---------------------------------------------------------------------------
 
-def as_number(value: Any) -> Optional[float]:
+def as_number(value: Any) -> float | None:
     """Return ``value`` as a float, or ``None`` if it is not numeric.
 
     ``bool`` is deliberately *not* treated as a number: a boolean field compared with
@@ -58,13 +59,13 @@ def as_number(value: Any) -> Optional[float]:
             out = float(value)
         except (OverflowError, ValueError):
             return None
-        if math.isnan(out):
+        if not math.isfinite(out):
             return None
         return out
     return None
 
 
-def as_sequence(value: Any) -> Optional[List[Any]]:
+def as_sequence(value: Any) -> list[Any] | None:
     """Iterate a container expression value in a stable order."""
 
     if isinstance(value, Mapping):
@@ -84,10 +85,10 @@ def as_sequence(value: Any) -> Optional[List[Any]]:
 class Comparison:
     """Outcome of evaluating one comparison."""
 
-    satisfied: Optional[bool]
+    satisfied: bool | None
     lhs: Any = None
     rhs: Any = None
-    residual: Optional[float] = None
+    residual: float | None = None
     tol: float = 1e-6
     detail: str = ""
 
@@ -100,7 +101,7 @@ class Comparison:
 # evaluator
 # ---------------------------------------------------------------------------
 
-def eval_expr(expr: Any, env: Mapping[Any, Any], elem: Optional[Mapping[str, Any]] = None) -> Any:
+def eval_expr(expr: Any, env: Mapping[Any, Any], elem: Mapping[str, Any] | None = None) -> Any:
     """Evaluate ``expr`` against ``env``.
 
     ``env`` is keyed by variable id (``int``) and/or field name (``str``).  ``elem``
@@ -147,7 +148,7 @@ def eval_expr(expr: Any, env: Mapping[Any, Any], elem: Optional[Mapping[str, Any
         name = getattr(expr, "name", None)
         if name is not None and name in env:
             return env[name]
-        return None
+        return MISSING
 
     if kind == "elem":
         name = getattr(expr, "name", None)
@@ -165,11 +166,11 @@ def eval_expr(expr: Any, env: Mapping[Any, Any], elem: Optional[Mapping[str, Any
                 return env[name]
             if name in elem:
                 return elem[name]
-        return None
+        return MISSING
 
     if kind == "model_ref":
         name = getattr(expr, "name", None)
-        return env.get(name) if name is not None else None
+        return env.get(name, MISSING) if name is not None else MISSING
 
     if kind == "values":
         base = eval_expr(args[0], env, elem) if args else None
@@ -235,7 +236,9 @@ def eval_expr(expr: Any, env: Mapping[Any, Any], elem: Optional[Mapping[str, Any
         return outcome.satisfied
 
     if kind in ("and", "or"):
-        values: List[Optional[bool]] = []
+        if not args:
+            return None
+        values: list[bool | None] = []
         for sub in args:
             values.append(_as_tristate(eval_expr(sub, env, elem)))
         if kind == "and":
@@ -254,7 +257,7 @@ def eval_expr(expr: Any, env: Mapping[Any, Any], elem: Optional[Mapping[str, Any
         if len(args) < 3:
             return None
         test = eval_expr(args[0], env, elem)
-        if test is None:
+        if test is None or test is MISSING:
             return None
         return eval_expr(args[1] if bool(test) else args[2], env, elem)
 
@@ -270,11 +273,15 @@ def eval_expr(expr: Any, env: Mapping[Any, Any], elem: Optional[Mapping[str, Any
                 return None
         return None
 
+    if kind == "not":
+        value = _as_tristate(eval_expr(args[0], env, elem)) if args else None
+        return None if value is None else not value
+
     if kind == "call":
         return _eval_call(expr, args, env, elem)
 
     # ``lambda``/``attr``/``unknown`` nodes are not concretely evaluable on their own.
-    return None
+    return MISSING
 
 
 def _eval_arithmetic(
@@ -308,7 +315,8 @@ def _eval_arithmetic(
         if kind == "div":
             return None if b == 0 else a / b
         if kind == "mod":
-            return None if b == 0 else math.fmod(a, b)
+            result = None if b == 0 else math.fmod(a, b)
+            return result if result is not None and math.isfinite(result) else None
         if kind == "pow":
             result = a ** b
             if isinstance(result, complex):
@@ -323,7 +331,7 @@ def _eval_arithmetic(
 
 def _eval_dot(
     expr: Any, args: Sequence[Any], env: Mapping[Any, Any], elem: Mapping[str, Any]
-) -> Optional[float]:
+) -> float | None:
     left = eval_expr(args[0], env, elem) if args else None
     right = getattr(expr, "value", None)
     if right is None and len(args) > 1:
@@ -341,7 +349,7 @@ def _eval_dot(
                 total += a * b
             return total
         seq = as_sequence(right)
-        if seq is None or len(seq) < len(left):
+        if seq is None or len(seq) != len(left):
             return None
         total = 0.0
         for (_, value), other in zip(left.items(), seq):
@@ -355,6 +363,8 @@ def _eval_dot(
     right_seq = as_sequence(right)
     if left_seq is None or right_seq is None:
         return None
+    if len(left_seq) != len(right_seq):
+        return None
     total = 0.0
     for a_raw, b_raw in zip(left_seq, right_seq):
         a = as_number(a_raw)
@@ -366,8 +376,8 @@ def _eval_dot(
 
 
 def _covariance_matrix(
-    weights: Sequence[Any], cov: Any, labels: Optional[Sequence[Any]] = None
-) -> Optional[List[List[float]]]:
+    weights: Sequence[Any], cov: Any, labels: Sequence[Any] | None = None
+) -> list[list[float]] | None:
     """Build a symmetric covariance matrix aligned with ``labels``.
 
     A dict-keyed covariance may cover a *superset* of the emitted weights (the portfolio
@@ -379,7 +389,7 @@ def _covariance_matrix(
     n = len(weights)
     if isinstance(cov, Mapping):
         if labels is None:
-            derived: List[Any] = []
+            derived: list[Any] = []
             for key in cov.keys():
                 first = key[0] if isinstance(key, (tuple, list)) and len(key) == 2 else key
                 if first not in derived:
@@ -418,7 +428,7 @@ def _covariance_matrix(
 
 def _eval_quad_form(
     expr: Any, args: Sequence[Any], env: Mapping[Any, Any], elem: Mapping[str, Any]
-) -> Optional[float]:
+) -> float | None:
     weights = eval_expr(args[0], env, elem) if args else None
     cov = getattr(expr, "value", None)
     if weights is None or cov is None:
@@ -442,7 +452,7 @@ def _eval_quad_form(
     return total
 
 
-def _collect_elem_names(expr: Any, out: Optional[Set[str]] = None) -> Set[str]:
+def _collect_elem_names(expr: Any, out: set[str] | None = None) -> set[str]:
     out = out if out is not None else set()
     if expr is None or not hasattr(expr, "kind"):
         return out
@@ -463,7 +473,7 @@ def _collect_elem_names(expr: Any, out: Optional[Set[str]] = None) -> Set[str]:
 
 def _eval_forall(
     expr: Any, env: Mapping[Any, Any], elem: Mapping[str, Any]
-) -> Optional[bool]:
+) -> bool | None:
     iterable = eval_expr(getattr(expr, "iterable", None), env, elem)
     items = as_sequence(iterable)
     if items is None:
@@ -473,7 +483,7 @@ def _eval_forall(
         return None
     names = _collect_elem_names(predicate)
     bound_name = sorted(names)[0] if names else "elem"
-    results: List[Optional[bool]] = []
+    results: list[bool | None] = []
     for item in items:
         binding = dict(elem)
         binding[bound_name] = item
@@ -513,8 +523,8 @@ def _eval_call(
         return None
 
 
-def _as_tristate(value: Any) -> Optional[bool]:
-    if value is None:
+def _as_tristate(value: Any) -> bool | None:
+    if value is None or value is MISSING:
         return None
     if isinstance(value, bool):
         return value
@@ -526,18 +536,23 @@ def _as_tristate(value: Any) -> Optional[bool]:
 # ---------------------------------------------------------------------------
 
 def eval_compare(
-    expr: Any, env: Mapping[Any, Any], elem: Optional[Mapping[str, Any]] = None
+    expr: Any, env: Mapping[Any, Any], elem: Mapping[str, Any] | None = None
 ) -> Comparison:
     """Evaluate a comparison, returning the residual for diagnostics."""
 
     if expr is None or getattr(expr, "kind", None) != "compare":
         return Comparison(satisfied=None, detail="not a comparison")
-    tol = float(getattr(expr, "tol", 1e-6) or 1e-6)
+    tol = float(getattr(expr, "tol", 0.0) or 0.0)
     op = getattr(expr, "op", "eq")
     lhs = eval_expr(getattr(expr, "lhs", None), env, elem)
     rhs = eval_expr(getattr(expr, "rhs", None), env, elem)
-    if lhs is None or rhs is None:
+    if lhs is MISSING or rhs is MISSING:
         return Comparison(satisfied=None, lhs=lhs, rhs=rhs, tol=tol, detail="incomplete")
+    if lhs is None or rhs is None:
+        if op in ("eq", "ne"):
+            equal = lhs is None and rhs is None
+            return Comparison(satisfied=equal if op == "eq" else not equal, lhs=lhs, rhs=rhs, tol=tol)
+        return Comparison(satisfied=None, lhs=lhs, rhs=rhs, tol=tol, detail="ordering with null")
 
     a = as_number(lhs)
     b = as_number(rhs)
@@ -560,6 +575,14 @@ def eval_compare(
                               detail=f"unknown operator {op}")
         return Comparison(satisfied=bool(ok), lhs=lhs, rhs=rhs, residual=residual, tol=tol)
 
+    if op in ("in", "not_in"):
+        try:
+            ok = lhs in rhs
+            return Comparison(ok if op == "in" else not ok, lhs, rhs, tol=tol)
+        except TypeError:
+            return Comparison(None, lhs, rhs, tol=tol, detail="invalid membership")
+    if op not in ("eq", "ne") or isinstance(lhs, bool) != isinstance(rhs, bool):
+        return Comparison(satisfied=None, lhs=lhs, rhs=rhs, tol=tol, detail="unsupported non-numeric comparison")
     # Non-numeric comparisons are limited to equality of hashable/scalar values.
     try:
         equal = lhs == rhs
@@ -586,13 +609,13 @@ def format_number(value: Any) -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
-        if value == int(value) and abs(value) < 1e16:
+        if math.isfinite(value) and value == int(value) and abs(value) < 1e16:
             return str(int(value))
         return repr(value)
     return str(value)
 
 
-def expr_to_str(expr: Any, names: Optional[Mapping[int, str]] = None, prefix: str = "") -> str:
+def expr_to_str(expr: Any, names: Mapping[int, str] | None = None, prefix: str = "") -> str:
     """Human-readable rendering of a VIR expression (used in diagnostics and SMT comments)."""
 
     if expr is None:
@@ -683,7 +706,7 @@ def expr_to_str(expr: Any, names: Optional[Mapping[int, str]] = None, prefix: st
     return getattr(expr, "name", None) or kind
 
 
-def collect_var_ids(expr: Any, out: Optional[List[int]] = None) -> List[int]:
+def collect_var_ids(expr: Any, out: list[int] | None = None) -> list[int]:
     """Collect variable ids referenced by an expression (order-preserving)."""
 
     out = out if out is not None else []

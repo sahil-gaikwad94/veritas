@@ -1,465 +1,347 @@
-"""AST transpiler: Python function + Pydantic model -> VirSpec."""
+"""Strict Python-AST to data-only VIR compiler.
 
+Unsupported syntax is an error, never an ignored constraint. DSL identity is resolved
+through captured Python objects, not through a function-name suffix.
+"""
 from __future__ import annotations
 
 import ast
+import builtins
+import copy
 import inspect
+import math
+import operator
 import textwrap
-from typing import Any, Dict, List, Optional
+import typing
 
-try:
-    import numpy as np
-except Exception:  # pragma: no cover - numpy optional
-    np = None
-
-from .vir import VirExpr, VirSpec, VirType, ZeroDofRule, SoftPreference
-from .dependency_graph import DependencyGraph
-from .schema_lowering import lower_pydantic_model, _python_type_to_vir_type
 from .analysis import analyze_containers
+from .schema_lowering import lower_pydantic_model
+from .vir import SoftPreference, VirExpr, VirSpec, ZeroDofRule
 
 
-class TranspileError(Exception):
-    pass
+class TranspileError(ValueError):
+    """A schema uses syntax outside the supported, checkable DSL."""
 
 
 class AstTranspiler:
-    def __init__(self, func, model, config: Optional[Dict[str, Any]] = None):
-        self.func = func
+    _CALLS = {"require", "derive", "prefer", "forall", "sum", "dot", "quad_form", "sqrt", "keys_subset"}
+    _BUILTINS = {"abs": builtins.abs, "min": builtins.min, "max": builtins.max,
+                 "len": builtins.len, "round": builtins.round}
+
+    def __init__(self, func, model, config=None):
+        self.func = inspect.unwrap(func)
         self.model = model
-        self.config = config or {}
-        self.param_name = self._first_param_name(func)
-        self.globals = dict(getattr(func, "__globals__", {}))
-        # capture closure (free) variables when available
-        code = getattr(func, "__code__", None)
-        closure = getattr(func, "__closure__", None)
-        if code is not None and closure is not None:
-            for name, cell in zip(getattr(code, "co_freevars", ()), closure):
-                try:
-                    self.globals[name] = cell.cell_contents
-                except ValueError:
-                    pass
+        self.config = dict(config or {})
+        params = list(inspect.signature(self.func).parameters.values())
+        if len(params) != 1 or params[0].kind not in (inspect.Parameter.POSITIONAL_ONLY,
+                                                      inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            raise TranspileError("schema function must take exactly one positional model parameter")
+        self.param_name = params[0].name
+        self.globals = dict(getattr(self.func, "__globals__", {}))
+        code = getattr(self.func, "__code__", None)
+        for name, cell in zip(getattr(code, "co_freevars", ()), getattr(self.func, "__closure__", ()) or ()):
+            try:
+                self.globals[name] = cell.cell_contents
+            except ValueError:
+                raise TranspileError(f"unbound closure constant {name!r}") from None
+        try:
+            hints = typing.get_type_hints(self.func, localns=self.globals)
+        except Exception:
+            hints = {}
+        if hints.get(self.param_name, params[0].annotation) is not model:
+            raise TranspileError("the resolved model annotation does not match the supplied model")
         lowered = lower_pydantic_model(model)
-        self.graph: DependencyGraph = lowered["graph"]
+        self.graph = lowered["graph"]
         self.var_table = lowered["var_table"]
-        self.var_ids: Dict[str, int] = {f["name"]: f["var_id"] for f in lowered["fields"]}
-        # name->id map convenience
-        self.name_to_id: Dict[str, int] = dict(self.graph.name_to_id)
-        self.id_to_name: Dict[int, str] = dict(self.graph.id_to_name)
+        self.lowered = lowered
+        self.name_to_id = dict(self.graph.name_to_id)
+        self.id_to_name = dict(self.graph.id_to_name)
+        self.requires, self.derives, self.prefers = [], [], []
+        self.zero_dof_rules, self.soft_preferences = [], []
+        self._lambda_names: list[str] = []
+        self._source_name = "<schema>"
 
-        self.requires: List[VirExpr] = []
-        self.derives: List[VirExpr] = []
-        self.prefers: List[VirExpr] = []
-        self.zero_dof_rules: List[ZeroDofRule] = []
-        self.soft_preferences: List[SoftPreference] = []
-        self._soft_counter = 0
-        self._current_lambda_param: Optional[str] = None
+    def _error(self, node, message):
+        line = getattr(node, "lineno", 0)
+        raise TranspileError(f"{self._source_name}:{line}: {message}")
 
-    # ---------- public ----------
     def transpile(self) -> VirSpec:
         try:
-            source = textwrap.dedent(inspect.getsource(self.func))
-        except (OSError, TypeError) as e:
-            raise TranspileError(f"Cannot get source for {self.func}: {e}")
-        tree = ast.parse(source)
-        func_nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        if not func_nodes:
-            func_nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        if not func_nodes:
-            raise TranspileError("No function definition found")
-        func_node = func_nodes[0]
-
-        for stmt in func_node.body:
-            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-                self._handle_top_level(stmt.value)
-
-        # Build zero-dof rules from derives where target is a derived var
+            file_name = inspect.getsourcefile(self.func) or "<schema>"
+            source, start = inspect.getsourcelines(self.func)
+        except (OSError, TypeError) as exc:
+            raise TranspileError(f"schema source is unavailable (define it in a Python module): {exc}") from exc
+        self._source_name = f"{file_name}:{start}"
+        try:
+            tree = ast.parse(textwrap.dedent("".join(source)))
+        except SyntaxError as exc:
+            raise TranspileError(f"invalid schema source: {exc}") from exc
+        matches = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and n.name == self.func.__name__]
+        if not matches:
+            raise TranspileError("cannot locate the schema function in its source")
+        node = matches[0]
+        if isinstance(node, ast.AsyncFunctionDef):
+            self._error(node, "schema declarations must be synchronous")
+        for stmt in node.body:
+            if isinstance(stmt, ast.Pass):
+                continue
+            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+                continue
+            if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+                self._error(stmt, "only vt.require/derive/prefer calls are allowed; arbitrary Python is not compiled")
+            self._handle_top_level(stmt.value)
         self._build_zero_dof_rules()
-
-        variables: Dict[int, Dict[str, Any]] = {}
-        for vid, info in self.var_table.items():
-            variables[vid] = {"name": info["name"], "type": info["type"]}
-
         spec = VirSpec(
             model=self.model,
-            variables=variables,
-            id_to_name=dict(self.id_to_name),
-            name_to_id=dict(self.name_to_id),
-            field_order=[],  # filled by caller / dependency graph
-            requires=self.requires,
-            derives=self.derives,
-            prefers=self.prefers,
-            zero_dof_rules=self.zero_dof_rules,
-            soft_preferences=self.soft_preferences,
-            config=dict(self.config),
+            variables={vid: {"name": info["name"], "type": info["type"]} for vid, info in self.var_table.items()},
+            id_to_name=dict(self.id_to_name), name_to_id=dict(self.name_to_id),
+            field_order=self.graph.topological_order(), requires=self.requires, derives=self.derives,
+            prefers=self.prefers, zero_dof_rules=self.zero_dof_rules,
+            soft_preferences=self.soft_preferences, config=dict(self.config),
+            model_schema=self.lowered["model_schema"], field_aliases=self.lowered["field_aliases"],
+            portable_model=self.lowered["portable_model"],
         )
-        # topological order (free variables before their 0-DoF dependents)
-        spec.field_order = self.graph.topological_order()
-        # container universe / element bounds / residual-sum targets
         spec.containers = analyze_containers(spec)
         return spec
 
-    # ---------- top-level handlers ----------
-    def _handle_top_level(self, call: ast.Call):
-        name = self._call_name(call)
-        short = name.split(".")[-1]
-        if short == "require":
-            expr = self.parse_expr(call.args[0]) if call.args else None
-            tol = self._kw(call, "tol", 1e-6)
-            if expr is not None:
-                expr.tol = tol
-                self.requires.append(expr)
-        elif short == "derive":
-            expr = self.parse_expr(call.args[0]) if call.args else None
-            tol = self._kw(call, "tol", 1e-6)
-            if expr is not None:
-                expr.tol = tol
-                self.derives.append(expr)
-                target, inputs = self._derive_target_inputs(expr)
-                if target is not None and target in self.name_to_id:
-                    self.graph.add_derive(target, inputs, expr=expr, tol=tol)
-        elif short == "prefer":
-            expr = self.parse_expr(call.args[0]) if call.args else None
-            weight = self._kw(call, "weight", 1.0)
-            tag = self._kw(call, "tag", "")
-            if expr is not None:
-                expr.weight = weight
-                expr.tag = tag
-                self.prefers.append(expr)
-                self._soft_counter += 1
-                self.soft_preferences.append(
-                    SoftPreference(id=self._soft_counter, tag=tag, weight=weight, expr=expr)
-                )
+    def _resolve(self, node):
+        if isinstance(node, ast.Name):
+            return self.globals.get(node.id, getattr(builtins, node.id, None))
+        if isinstance(node, ast.Attribute):
+            base = self._resolve(node.value)
+            return getattr(base, node.attr, None)
+        return None
+
+    def _dsl_name(self, call):
+        obj = self._resolve(call.func)
+        name = getattr(obj, "_veritas_dsl", None)
+        if name in self._CALLS:
+            return name
+        # Direct imports from the DSL module are also identity checked.
+        module = getattr(obj, "__module__", None)
+        short = getattr(obj, "__name__", None)
+        if module == "veritas.decorators" and short in self._CALLS:
+            return short
+        return None
+
+    def _kw(self, call, allowed):
+        seen = set()
+        for kw in call.keywords:
+            if kw.arg not in allowed or kw.arg in seen:
+                self._error(call, f"unexpected/duplicate keyword {kw.arg!r}")
+            seen.add(kw.arg)
+        return {kw.arg: self._resolve_constant(kw.value) for kw in call.keywords}
+
+    def _arity(self, call, count, name):
+        if len(call.args) != count:
+            self._error(call, f"{name} expects {count} positional arguments")
+
+    @staticmethod
+    def _tol(node, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise TranspileError(f"{getattr(node, 'lineno', 0)}: tolerance must be finite and non-negative")
+        return float(value)
+
+    def _handle_top_level(self, call):
+        name = self._dsl_name(call)
+        if name not in {"require", "derive", "prefer"}:
+            self._error(call, "top-level call is not a Veritas constraint declaration")
+        self._arity(call, 1, name)
+        kw = self._kw(call, {"tol", "weight", "tag"} if name == "prefer" else {"tol"})
+        tol = self._tol(call, kw.pop("tol", 1e-6 if name == "derive" else 0.0))
+        expr = self.parse_expr(call.args[0])
+        stack = [expr]
+        while stack:
+            node = stack.pop()
+            if node.kind == "compare":
+                node.tol = tol
+            stack.extend(node.args)
+            stack.extend(child for child in (node.lhs, node.rhs, node.predicate) if child is not None)
+        if name == "require":
+            self.requires.append(expr)
+        elif name == "derive":
+            if expr.kind != "compare" or expr.op != "eq":
+                self._error(call, "derive requires target == expression")
+            target, rhs = self._derive_target(expr)
+            inputs = rhs.collect_var_ids()
+            if target in inputs:
+                self._error(call, "a derivation may not depend on itself")
+            if any(r.target_var == target for r in self.zero_dof_rules):
+                self._error(call, "duplicate derivation target")
+            self.derives.append(expr)
+            self.graph.add_derive(self.id_to_name[target], [self.id_to_name[v] for v in inputs], expr=expr, tol=tol)
         else:
-            # ignore unknown top-level calls
-            pass
+            weight = kw.pop("weight", 1.0)
+            tag = kw.pop("tag", "")
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight < 0:
+                self._error(call, "preference weight must be finite and non-negative")
+            if not isinstance(tag, str):
+                self._error(call, "preference tag must be a string")
+            expr.weight, expr.tag = float(weight), tag
+            self.prefers.append(expr)
+            self.soft_preferences.append(SoftPreference(len(self.soft_preferences) + 1, tag, float(weight), expr))
 
-    # ---------- expression parsing ----------
-    def parse_expr(self, node: ast.AST) -> VirExpr:
+    def parse_expr(self, node) -> VirExpr:
         if isinstance(node, ast.Constant):
-            if isinstance(node.value, bool):
-                return VirExpr(kind="const_bool", value=node.value)
-            if isinstance(node.value, int):
-                return VirExpr(kind="const_int", value=node.value)
-            if isinstance(node.value, float):
-                return VirExpr(kind="const_real", value=node.value)
-            if isinstance(node.value, str):
-                return VirExpr(kind="const_str", value=node.value)
-            if isinstance(node.value, (set, frozenset)):
-                return VirExpr(kind="const_set", value=sorted(node.value))
-            if isinstance(node.value, (list, tuple)):
-                return VirExpr(kind="const_list", value=list(node.value))
             if node.value is None:
-                return VirExpr(kind="const_none", value=None)
-            return VirExpr(kind="const", value=node.value)
-
+                return VirExpr(kind="const_none")
+            kind = {bool: "const_bool", int: "const_int", float: "const_real", str: "const_str"}.get(type(node.value))
+            if kind is None:
+                self._error(node, f"unsupported constant {type(node.value).__name__}")
+            if kind == "const_real" and not math.isfinite(node.value):
+                self._error(node, "non-finite constant")
+            return VirExpr(kind=kind, value=node.value)
         if isinstance(node, ast.Name):
             if node.id == self.param_name:
-                # bare model reference; rare
                 return VirExpr(kind="model_ref", name=node.id)
-            # lambda-bound element variable
-            if self._current_lambda_param and node.id == self._current_lambda_param:
+            if node.id in self._lambda_names:
                 return VirExpr(kind="elem", name=node.id)
-            # global constant
             if node.id in self.globals:
-                val = self.globals[node.id]
-                if isinstance(val, (int, float, bool, str, dict, list, tuple, set, frozenset)):
-                    return VirExpr(kind="const_value", value=val)
-            return VirExpr(kind="name", name=node.id)
-
+                return VirExpr(kind="const_value", value=self._resolve_constant(node))
+            self._error(node, f"unknown symbol {node.id!r}")
         if isinstance(node, ast.Attribute):
-            # model field access: p.weights
             if isinstance(node.value, ast.Name) and node.value.id == self.param_name:
-                fname = node.attr
-                if fname in self.name_to_id:
-                    return VirExpr(kind="var", var_id=self.name_to_id[fname], name=fname)
-            # something.values()
-            if node.attr == "values" and isinstance(node.value, ast.Attribute):
-                inner = self.parse_expr(node.value)
-                return VirExpr(kind="values", args=[inner])
-            if node.attr == "values" and isinstance(node.value, ast.Name) and node.value.id == self.param_name:
-                # p.values() unlikely
-                pass
-            return VirExpr(kind="attr", name=ast.unparse(node))
-
+                if node.attr not in self.name_to_id:
+                    self._error(node, f"unknown model field {node.attr!r}")
+                return VirExpr(kind="var", var_id=self.name_to_id[node.attr], name=node.attr)
+            self._error(node, "only direct model-field attributes are supported")
         if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "values" and not node.args:
-                inner = self.parse_expr(node.func.value)
-                return VirExpr(kind="values", args=[inner])
-            cname = self._call_name(node)
-            short = cname.split(".")[-1]
-            if short in ("sqrt",):
-                return VirExpr(kind="sqrt", args=[self.parse_expr(node.args[0])])
-            if short in ("sum",):
-                arg = self.parse_expr(node.args[0]) if node.args else VirExpr(kind="none")
-                return VirExpr(kind="sum", args=[arg])
-            if short in ("dot",):
+            if (isinstance(node.func, ast.Attribute) and node.func.attr == "values"
+                    and not node.args and not node.keywords):
+                return VirExpr(kind="values", args=[self.parse_expr(node.func.value)])
+            name = self._dsl_name(node)
+            if name in {"sum", "sqrt", "dot", "quad_form", "keys_subset", "forall"}:
+                counts = {"sum": 1, "sqrt": 1, "dot": 2, "quad_form": 2, "keys_subset": 2, "forall": 2}
+                self._arity(node, counts[name], name)
+                if node.keywords:
+                    self._error(node, f"{name} does not accept keywords")
+                if name == "forall":
+                    lam = node.args[1]
+                    if (not isinstance(lam, ast.Lambda) or len(lam.args.args) != 1 or lam.args.defaults
+                            or lam.args.vararg or lam.args.kwarg or lam.args.kwonlyargs or lam.args.posonlyargs):
+                        self._error(node, "forall requires a one-argument lambda")
+                    self._lambda_names.append(lam.args.args[0].arg)
+                    try:
+                        pred = self.parse_expr(lam.body)
+                    finally:
+                        self._lambda_names.pop()
+                    return VirExpr(kind="forall", iterable=self.parse_expr(node.args[0]), predicate=pred)
                 args = [self.parse_expr(a) for a in node.args]
-                # resolve constants for second arg if global
-                extra = {}
-                if len(node.args) >= 2 and isinstance(node.args[1], ast.Name):
-                    g = self.globals.get(node.args[1].id)
-                    if g is not None:
-                        extra["value"] = g
-                e = VirExpr(kind="dot", args=args)
-                if "value" in extra:
-                    e.value = extra["value"]
-                return e
-            if short in ("quad_form",):
-                # args: (weights, cov)
-                w_expr = self.parse_expr(node.args[0])
-                cov = self._resolve_constant(node.args[1]) if len(node.args) > 1 else None
-                w_name = w_expr.name if w_expr.kind == "var" else None
-                w_var_ids = [w_expr.var_id] if w_expr.var_id is not None else []
-                # if weights is a dict var, still single var id
-                cholesky_l = self._cholesky(cov)
-                return VirExpr(
-                    kind="quad_form_cholesky",
-                    args=[w_expr],
-                    weights_vars=w_var_ids,
-                    cholesky_l=cholesky_l,
-                    value=cov,
-                )
-            if short in ("keys_subset",):
-                d_expr = self.parse_expr(node.args[0]) if node.args else None
-                allowed = self._resolve_constant(node.args[1]) if len(node.args) > 1 else None
-                return VirExpr(kind="keys_subset", args=[d_expr] if d_expr else [], value=allowed)
-            if short in ("forall",):
-                # forall(iterable, lambda)
-                iterable_expr = self.parse_expr(node.args[0]) if node.args else None
-                lam = node.args[1] if len(node.args) > 1 else None
-                pred = None
-                if isinstance(lam, ast.Lambda):
-                    old = self._current_lambda_param
-                    self._current_lambda_param = lam.args.args[0].arg if lam.args.args else None
-                    pred = self.parse_expr(lam.body)
-                    self._current_lambda_param = old
-                return VirExpr(kind="forall", iterable=iterable_expr, predicate=pred)
-            # vt.require/derive/prefer shouldn't be nested; but handle as expr pass-through
-            if short in ("require", "derive", "prefer"):
-                if node.args:
-                    return self.parse_expr(node.args[0])
-            # generic function call
-            args = [self.parse_expr(a) for a in node.args]
-            return VirExpr(kind="call", name=cname, args=args)
-
+                if name == "quad_form":
+                    from ..cartridges.quant import cholesky, covariance_labels, covariance_matrix
+                    cov = self._resolve_constant(node.args[1])
+                    if not isinstance(cov, dict):
+                        self._error(node, "quad_form covariance must be a constant mapping")
+                    labels = covariance_labels(cov)
+                    factor = cholesky(covariance_matrix(labels, cov))
+                    if factor is None:
+                        self._error(node, "covariance must be symmetric positive definite")
+                    return VirExpr(kind="quad_form_cholesky", args=args, value=cov, cholesky_l=factor)
+                if name in {"dot", "keys_subset"}:
+                    return VirExpr(kind="quad_form_cholesky" if name == "quad_form" else name,
+                                   args=args, value=self._resolve_constant(node.args[1]))
+                return VirExpr(kind=name, args=args)
+            obj = self._resolve(node.func)
+            short = next((k for k, v in self._BUILTINS.items() if obj is v), None)
+            if short and not node.keywords:
+                return VirExpr(kind="call", name=short, args=[self.parse_expr(a) for a in node.args])
+            self._error(node, f"unsupported function {ast.unparse(node.func)!r}")
         if isinstance(node, ast.BinOp):
-            left = self.parse_expr(node.left)
-            right = self.parse_expr(node.right)
-            if isinstance(node.op, ast.Add):
-                return VirExpr(kind="add", lhs=left, rhs=right, args=[left, right])
-            if isinstance(node.op, ast.Sub):
-                return VirExpr(kind="sub", lhs=left, rhs=right, args=[left, right])
-            if isinstance(node.op, ast.Mult):
-                return VirExpr(kind="mul", lhs=left, rhs=right, args=[left, right])
-            if isinstance(node.op, ast.Div):
-                return VirExpr(kind="div", lhs=left, rhs=right, args=[left, right])
-            if isinstance(node.op, ast.Pow):
-                return VirExpr(kind="pow", lhs=left, rhs=right, args=[left, right])
-            if isinstance(node.op, ast.Mod):
-                return VirExpr(kind="mod", lhs=left, rhs=right, args=[left, right])
-            if isinstance(node.op, ast.BitAnd):
-                return VirExpr(kind="and", args=[left, right])
-            if isinstance(node.op, ast.BitOr):
-                return VirExpr(kind="or", args=[left, right])
-            return VirExpr(kind="binop", lhs=left, rhs=right, args=[left, right])
-
+            kinds = {ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div",
+                     ast.Pow: "pow", ast.Mod: "mod", ast.BitAnd: "and", ast.BitOr: "or"}
+            kind = kinds.get(type(node.op))
+            if kind is None:
+                self._error(node, f"unsupported operator {type(node.op).__name__}")
+            left, right = self.parse_expr(node.left), self.parse_expr(node.right)
+            return VirExpr(kind=kind, lhs=left, rhs=right, args=[left, right] if kind in ("and", "or") else [])
         if isinstance(node, ast.UnaryOp):
             operand = self.parse_expr(node.operand)
             if isinstance(node.op, ast.USub):
-                return VirExpr(kind="neg", args=[operand], lhs=operand)
+                return VirExpr(kind="neg", lhs=operand, args=[operand])
             if isinstance(node.op, ast.UAdd):
                 return operand
-            return VirExpr(kind="unary", args=[operand])
-
+            if isinstance(node.op, ast.Not):
+                return VirExpr(kind="not", args=[operand])
+            self._error(node, "unsupported unary operator")
         if isinstance(node, ast.Compare):
-            if len(node.ops) == 1:
-                left = self.parse_expr(node.left)
-                right = self.parse_expr(node.comparators[0])
-                op = self._cmp_op(node.ops[0])
-                e = VirExpr(kind="compare", op=op, lhs=left, rhs=right, tol=1e-6)
-                return e
-            # chained compares -> and
+            ops = {ast.Eq: "eq", ast.NotEq: "ne", ast.Lt: "lt", ast.LtE: "le",
+                   ast.Gt: "gt", ast.GtE: "ge", ast.In: "in", ast.NotIn: "not_in"}
             parts = []
-            cur = node.left
-            for op, comp in zip(node.ops, node.comparators):
-                parts.append(ast.Compare(left=cur, ops=[op], comparators=[comp]))
-                cur = comp
-            # parse each as compare
-            parsed = [self.parse_expr(p) for p in parts]  # won't work: p is ast.Compare already okay
-            # Actually parse_expr accepts ast.Compare
-            and_expr = VirExpr(kind="and", args=parsed)
-            return and_expr
-
+            left = node.left
+            for op, right in zip(node.ops, node.comparators):
+                if type(op) not in ops:
+                    self._error(node, f"unsupported comparison {type(op).__name__}")
+                parts.append(VirExpr(kind="compare", op=ops[type(op)], lhs=self.parse_expr(left), rhs=self.parse_expr(right)))
+                left = right
+            return parts[0] if len(parts) == 1 else VirExpr(kind="and", args=parts)
         if isinstance(node, ast.BoolOp):
-            parsed = [self.parse_expr(v) for v in node.values]
-            if isinstance(node.op, ast.And):
-                return VirExpr(kind="and", args=parsed)
-            if isinstance(node.op, ast.Or):
-                return VirExpr(kind="or", args=parsed)
-            return VirExpr(kind="boolop", args=parsed)
-
+            return VirExpr(kind="and" if isinstance(node.op, ast.And) else "or",
+                           args=[self.parse_expr(v) for v in node.values])
         if isinstance(node, ast.IfExp):
             return VirExpr(kind="ifexp", args=[self.parse_expr(node.test), self.parse_expr(node.body), self.parse_expr(node.orelse)])
-
         if isinstance(node, ast.Subscript):
-            base = self.parse_expr(node.value)
-            sl = node.slice
-            if isinstance(sl, ast.Constant):
-                key = sl.value
-            elif isinstance(sl, ast.Index):  # py<3.9
-                key = self._resolve_constant(sl.value)
+            return VirExpr(kind="subscript", args=[self.parse_expr(node.value)], value=self._resolve_constant(node.slice))
+        if isinstance(node, (ast.List, ast.Set, ast.Tuple, ast.Dict)):
+            return VirExpr(kind={ast.List: "const_list", ast.Set: "const_set", ast.Tuple: "const_tuple", ast.Dict: "const_dict"}[type(node)],
+                           value=self._resolve_constant(node))
+        self._error(node, f"unsupported syntax {type(node).__name__}")
+
+    def _resolve_constant(self, node):
+        """Capture constants by value; never evaluate source text."""
+        try:
+            if isinstance(node, ast.Name):
+                if node.id not in self.globals:
+                    raise ValueError(f"unknown constant {node.id!r}")
+                value = self.globals[node.id]
+            elif isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+                value = self._resolve_constant(node.operand)
+                value = -value if isinstance(node.op, ast.USub) else +value
+            elif isinstance(node, ast.BinOp) and type(node.op) in (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow):
+                fn = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+                      ast.Div: operator.truediv, ast.Pow: operator.pow}[type(node.op)]
+                value = fn(self._resolve_constant(node.left), self._resolve_constant(node.right))
             else:
-                key = self._resolve_constant(sl)
-            return VirExpr(kind="subscript", args=[base], value=key, name=str(key))
+                value = ast.literal_eval(node)
+            value = copy.deepcopy(value)
+            self._check_constant(value)
+            return value
+        except Exception as exc:
+            self._error(node, f"expected an immutable JSON-compatible constant: {exc}")
 
-        if isinstance(node, ast.Lambda):
-            old = self._current_lambda_param
-            if node.args.args:
-                self._current_lambda_param = node.args.args[0].arg
-            body = self.parse_expr(node.body)
-            self._current_lambda_param = old
-            return VirExpr(kind="lambda", predicate=body)
+    def _check_constant(self, value, depth=0):
+        if depth > 32:
+            raise ValueError("constant nesting exceeds 32")
+        if value is None or isinstance(value, (str, bool, int)):
+            return
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("non-finite constant")
+            return
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for item in value:
+                self._check_constant(item, depth + 1)
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if not isinstance(key, (str, int, float, bool, tuple)) and key is not None:
+                    raise ValueError("unsupported mapping key")
+                self._check_constant(key, depth + 1)
+                self._check_constant(item, depth + 1)
+            return
+        raise ValueError(f"unsupported constant type {type(value).__name__}")
 
-        if isinstance(node, ast.List):
-            return VirExpr(kind="const_list", value=[self._resolve_constant(e) for e in node.elts])
-        if isinstance(node, ast.Set):
-            return VirExpr(kind="const_set", value=sorted(self._resolve_constant(e) for e in node.elts))
-        if isinstance(node, ast.Tuple):
-            return VirExpr(kind="const_tuple", value=tuple(self._resolve_constant(e) for e in node.elts))
-        if isinstance(node, ast.Dict):
-            keys = [self._resolve_constant(k) if k is not None else None for k in node.keys]
-            vals = [self._resolve_constant(v) for v in node.values]
-            return VirExpr(kind="const_dict", value=dict(zip(keys, vals)))
-
-        return VirExpr(kind="unknown", name=ast.unparse(node) if hasattr(ast, "unparse") else str(node))
-
-    # ---------- helpers ----------
-    def _first_param_name(self, func) -> str:
-        sig = inspect.signature(func)
-        params = list(sig.parameters.values())
-        if not params:
-            raise TranspileError("verified_schema function must have at least one parameter")
-        return params[0].name
-
-    def _call_name(self, call: ast.Call) -> str:
-        if isinstance(call.func, ast.Name):
-            return call.func.id
-        if isinstance(call.func, ast.Attribute):
-            return ast.unparse(call.func) if hasattr(ast, "unparse") else f"{call.func.value.id}.{call.func.attr}"
-        return ""
-
-    def _kw(self, call: ast.Call, key: str, default: Any) -> Any:
-        for kw in call.keywords:
-            if kw.arg == key:
-                return self._resolve_constant(kw.value)
-        return default
-
-    def _cmp_op(self, op: ast.cmpop) -> str:
-        mapping = {
-            ast.Eq: "eq",
-            ast.NotEq: "ne",
-            ast.Lt: "lt",
-            ast.LtE: "le",
-            ast.Gt: "gt",
-            ast.GtE: "ge",
-        }
-        return mapping.get(type(op), "eq")
-
-    def _resolve_constant(self, node: ast.AST) -> Any:
-        if isinstance(node, ast.Constant):
-            return node.value
-        if isinstance(node, ast.Name):
-            if node.id in self.globals:
-                return self.globals[node.id]
-            return node.id
-        if isinstance(node, ast.List):
-            return [self._resolve_constant(e) for e in node.elts]
-        if isinstance(node, ast.Tuple):
-            return tuple(self._resolve_constant(e) for e in node.elts)
-        if isinstance(node, ast.Set):
-            return {self._resolve_constant(e) for e in node.elts}
-        if isinstance(node, ast.Dict):
-            ks = [self._resolve_constant(k) if k is not None else None for k in node.keys]
-            vs = [self._resolve_constant(v) for v in node.values]
-            return dict(zip(ks, vs))
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            v = self._resolve_constant(node.operand)
-            if isinstance(v, (int, float)):
-                return -v
-        # fallback: try ast.unparse + eval (best effort, safe-ish on globals)
-        try:
-            src = ast.unparse(node)
-            return eval(src, {"__builtins__": {}}, self.globals)
-        except Exception:
-            return None
-
-    def _cholesky(self, cov: Any) -> List[List[float]]:
-        if cov is None:
-            return []
-        if np is None:
-            return []
-        try:
-            if isinstance(cov, dict):
-                keys = sorted({k[0] if isinstance(k, tuple) else k for k in cov.keys()})
-                n = len(keys)
-                idx = {k: i for i, k in enumerate(keys)}
-                mat = [[0.0] * n for _ in range(n)]
-                for (a, b), v in cov.items():
-                    if a in idx and b in idx:
-                        mat[idx[a]][idx[b]] = float(v)
-                        mat[idx[b]][idx[a]] = float(v)
-                cov = mat
-            arr = np.array(cov, dtype=float)
-            L = np.linalg.cholesky(arr)
-            return L.tolist()
-        except Exception:
-            return []
-
-    def _derive_target_inputs(self, expr: VirExpr):
-        target = None
-        inputs: List[str] = []
-        if expr.kind == "compare" and expr.op == "eq":
-            if expr.lhs is not None and expr.lhs.kind == "var" and expr.lhs.name is not None:
-                target = expr.lhs.name
-            elif expr.lhs is not None and expr.lhs.kind == "var" and expr.lhs.var_id is not None:
-                target = self.id_to_name.get(expr.lhs.var_id)
-        # collect var names from rhs
-        rhs = expr.rhs if expr.kind == "compare" else expr
-        ids = rhs.collect_var_ids() if hasattr(rhs, "collect_var_ids") else []
-        for vid in ids:
-            nm = self.id_to_name.get(vid)
-            if nm is not None and nm not in inputs:
-                inputs.append(nm)
-        # Also resolve names from const_value? no
-        # If target None, try any var on lhs of compare
-        if target is None and expr.kind == "compare" and expr.lhs is not None and expr.lhs.kind == "var":
-            target = expr.lhs.name or self.id_to_name.get(expr.lhs.var_id)
-        return target, inputs
+    def _derive_target(self, expr):
+        if expr.lhs.kind == "var" and not any(v == expr.lhs.var_id for v in expr.rhs.collect_var_ids()):
+            return expr.lhs.var_id, expr.rhs
+        if expr.rhs.kind == "var" and not any(v == expr.rhs.var_id for v in expr.lhs.collect_var_ids()):
+            expr.lhs, expr.rhs = expr.rhs, expr.lhs
+            return expr.lhs.var_id, expr.rhs
+        self._error(expr, "derive requires one isolated target field")
 
     def _build_zero_dof_rules(self):
-        for d in self.derives:
-            target, inputs = self._derive_target_inputs(d)
-            if target is None:
-                continue
-            # only derived fields (not free) become zero-dof
-            if target not in self.name_to_id:
-                continue
-            target_vid = self.name_to_id[target]
-            input_vids = [self.name_to_id[x] for x in inputs if x in self.name_to_id]
-            # precision digits from tol? default 6
-            prec = 6
-            if getattr(d, "tol", None):
-                try:
-                    prec = max(1, int(-np.log10(d.tol))) if d.tol > 0 else 6
-                except Exception:
-                    prec = 6
-            rule = ZeroDofRule(
-                target_var=target_vid,
-                target_json_key=target,
-                input_vars=input_vids,
-                rhs_expr=d,
-                precision_digits=prec,
-            )
-            self.zero_dof_rules.append(rule)
-            # attach to graph
-            self.graph.add_derive(target, inputs, expr=d, tol=getattr(d, "tol", 1e-6))
+        for expr in self.derives:
+            target, rhs = self._derive_target(expr)
+            precision = min(15, max(0, math.ceil(-math.log10(expr.tol)))) if expr.tol > 0 else 15
+            self.zero_dof_rules.append(ZeroDofRule(target, self.id_to_name[target], rhs.collect_var_ids(),
+                                                   expr, precision_digits=precision))

@@ -6,10 +6,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import veritas as vt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from veritas.instance import verify_instance, verify_values
+import veritas as vt
+from veritas.instance import verify_values
 from veritas.serde import spec_digest, spec_from_dict, spec_to_dict
 
 
@@ -117,8 +117,8 @@ def test_quad_form_is_symmetric():
     w = _weights()
     direct = 0.0
     labels = list(w.keys())
-    for i, a in enumerate(labels):
-        for j, b in enumerate(labels):
+    for _i, a in enumerate(labels):
+        for _j, b in enumerate(labels):
             key = (a, b) if (a, b) in COV else (b, a)
             direct += w[a] * COV[key] * w[b]
     assert abs(vt.quad_form(w, COV) - direct) < 1e-12

@@ -13,18 +13,20 @@ both rely on.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any
 
 from .compiler.vir import VirExpr, VirSpec, ZeroDofRule
 from .evaluate import (
+    MISSING,
     Comparison,
     as_number,
     eval_compare,
     eval_expr,
     expr_to_str,
-    format_number,
 )
+from .json_pda import JSONSyntaxError, parse_json
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -38,7 +40,7 @@ INCOMPLETE = "INCOMPLETE"
 class VerificationError(Exception):
     """Raised when a concrete instance violates a schema's hard constraints."""
 
-    def __init__(self, report: "VerificationReport"):
+    def __init__(self, report: VerificationReport):
         self.report = report
         super().__init__(report.summary_line())
 
@@ -56,16 +58,16 @@ class ConstraintOutcome:
     index: int
     kind: str  # "require" | "derive" | "prefer"
     text: str
-    satisfied: Optional[bool]
+    satisfied: bool | None
     tol: float = 1e-6
-    residual: Optional[float] = None
+    residual: float | None = None
     lhs: Any = None
     rhs: Any = None
     detail: str = ""
     weight: float = 1.0
     tag: str = ""
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         payload = {
             "index": self.index,
             "kind": self.kind,
@@ -86,17 +88,17 @@ class VerificationReport:
     """Result of checking one concrete instance against a compiled spec."""
 
     status: str = INCOMPLETE
-    outcomes: List[ConstraintOutcome] = field(default_factory=list)
-    preferences: List[ConstraintOutcome] = field(default_factory=list)
-    unsat_core: List[int] = field(default_factory=list)
-    derived: Dict[str, Any] = field(default_factory=dict)
-    unresolved: List[str] = field(default_factory=list)
-    missing: List[str] = field(default_factory=list)
-    values: Dict[str, Any] = field(default_factory=dict)
+    outcomes: list[ConstraintOutcome] = field(default_factory=list)
+    preferences: list[ConstraintOutcome] = field(default_factory=list)
+    unsat_core: list[int] = field(default_factory=list)
+    derived: dict[str, Any] = field(default_factory=dict)
+    unresolved: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    values: dict[str, Any] = field(default_factory=dict)
     model: Any = None
-    model_error: Optional[str] = None
-    relaxation: List[str] = field(default_factory=list)
-    spec_digest: Optional[str] = None
+    model_error: str | None = None
+    relaxation: list[str] = field(default_factory=list)
+    spec_digest: str | None = None
 
     # -- convenience ------------------------------------------------------
     @property
@@ -104,11 +106,11 @@ class VerificationReport:
         return self.status == PASS
 
     @property
-    def violations(self) -> List[ConstraintOutcome]:
+    def violations(self) -> list[ConstraintOutcome]:
         return [o for o in self.outcomes if o.satisfied is False]
 
     @property
-    def unknown(self) -> List[ConstraintOutcome]:
+    def unknown(self) -> list[ConstraintOutcome]:
         return [o for o in self.outcomes if o.satisfied is None]
 
     def summary_line(self) -> str:
@@ -125,12 +127,12 @@ class VerificationReport:
             f"{counts[INCOMPLETE]} unevaluated"
         )
 
-    def raise_if_failed(self) -> "VerificationReport":
+    def raise_if_failed(self) -> VerificationReport:
         if self.status != PASS:
             raise VerificationError(self)
         return self
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
             "summary": self.summary_line(),
@@ -156,7 +158,7 @@ class VerificationReport:
 # instance lowering
 # ---------------------------------------------------------------------------
 
-def extract_data(instance: Any) -> Dict[str, Any]:
+def extract_data(instance: Any) -> dict[str, Any]:
     """Normalize a Pydantic model / mapping / JSON string into a plain dict."""
 
     if instance is None:
@@ -166,7 +168,7 @@ def extract_data(instance: Any) -> Dict[str, Any]:
     if isinstance(instance, (str, bytes, bytearray)):
         text = instance.decode("utf-8") if isinstance(instance, (bytes, bytearray)) else instance
         try:
-            payload = json.loads(text)
+            payload = parse_json(text)
         except json.JSONDecodeError as exc:
             raise InstanceFormatError(f"instance is not valid JSON: {exc}") from exc
         if not isinstance(payload, Mapping):
@@ -189,11 +191,11 @@ def extract_data(instance: Any) -> Dict[str, Any]:
     )
 
 
-def lower_instance(spec: VirSpec, instance: Any) -> Tuple[Dict[str, Any], Dict[Any, Any]]:
+def lower_instance(spec: VirSpec, instance: Any) -> tuple[dict[str, Any], dict[Any, Any]]:
     """Return ``(data, env)`` where ``env`` is keyed by both var id and field name."""
 
     data = extract_data(instance)
-    env: Dict[Any, Any] = {}
+    env: dict[Any, Any] = {}
     for vid, info in spec.variables.items():
         name = info.get("name") or spec.id_to_name.get(vid)
         if name is None:
@@ -204,8 +206,8 @@ def lower_instance(spec: VirSpec, instance: Any) -> Tuple[Dict[str, Any], Dict[A
     return data, env
 
 
-def _rule_targets(spec: VirSpec) -> Dict[str, ZeroDofRule]:
-    out: Dict[str, ZeroDofRule] = {}
+def _rule_targets(spec: VirSpec) -> dict[str, ZeroDofRule]:
+    out: dict[str, ZeroDofRule] = {}
     for rule in spec.zero_dof_rules:
         name = rule.target_json_key
         if name is None and isinstance(rule.target_var, int):
@@ -227,7 +229,8 @@ def _evaluate_rule(rule: ZeroDofRule, env: Mapping[Any, Any]) -> Any:
     if getattr(expr, "kind", None) == "compare":
         # A derive rule is stored as `target == rhs`; compute the rhs side.
         expr = expr.rhs if expr.rhs is not None else expr.lhs
-    return eval_expr(expr, env)
+    value = eval_expr(expr, env)
+    return None if value is MISSING else value
 
 
 def fill_derived(
@@ -235,7 +238,7 @@ def fill_derived(
     data: Mapping[str, Any],
     *,
     overwrite: bool = False,
-) -> Tuple[Dict[str, Any], List[str], Dict[str, Any]]:
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     """Evaluate 0-DoF rules in topological order.
 
     Returns ``(values, unresolved, derived)``.  ``derived`` only contains fields that
@@ -245,8 +248,8 @@ def fill_derived(
 
     values = dict(data)
     rules = _rule_targets(spec)
-    unresolved: List[str] = []
-    derived: Dict[str, Any] = {}
+    unresolved: list[str] = []
+    derived: dict[str, Any] = {}
     order = list(spec.field_order) or list(spec.name_to_id.keys())
     # Any derived field missing from the topological order is appended at the end.
     for name in rules:
@@ -260,7 +263,7 @@ def fill_derived(
         present = name in values and values[name] is not None
         if present and not overwrite:
             continue
-        env: Dict[Any, Any] = {}
+        env: dict[Any, Any] = {}
         for vid, info in spec.variables.items():
             field_name = info.get("name") or spec.id_to_name.get(vid)
             if field_name and field_name in values and values[field_name] is not None:
@@ -278,7 +281,7 @@ def fill_derived(
     return values, unresolved, derived
 
 
-def build_model(spec: VirSpec, values: Mapping[str, Any]) -> Tuple[Any, Optional[str]]:
+def build_model(spec: VirSpec, values: Mapping[str, Any]) -> tuple[Any, str | None]:
     model_cls = spec.model
     if model_cls is None:
         return None, None
@@ -339,7 +342,7 @@ def _outcome_for(
     )
 
 
-def _relaxation_hint(outcome: ConstraintOutcome) -> Optional[str]:
+def _relaxation_hint(outcome: ConstraintOutcome) -> str | None:
     if outcome.satisfied is not False:
         return None
     if outcome.residual is not None:
@@ -355,14 +358,14 @@ def _relaxation_hint(outcome: ConstraintOutcome) -> Optional[str]:
 
 def _collect(
     spec: VirSpec, env: Mapping[Any, Any]
-) -> Tuple[List[ConstraintOutcome], List[ConstraintOutcome]]:
+) -> tuple[list[ConstraintOutcome], list[ConstraintOutcome]]:
     names = spec.id_to_name
-    outcomes: List[ConstraintOutcome] = []
+    outcomes: list[ConstraintOutcome] = []
     for i, expr in enumerate(spec.requires):
         outcomes.append(_outcome_for(i, "require", expr, env, names))
     for i, expr in enumerate(spec.derives, start=len(spec.requires)):
         outcomes.append(_outcome_for(i, "derive", expr, env, names))
-    preferences: List[ConstraintOutcome] = []
+    preferences: list[ConstraintOutcome] = []
     for i, pref in enumerate(spec.soft_preferences):
         if pref.expr is None:
             continue
@@ -380,22 +383,62 @@ def _collect(
     return outcomes, preferences
 
 
-def _minimal_core(spec: VirSpec, env: Mapping[Any, Any], violated: Sequence[int]) -> List[int]:
-    """Deletion-based minimal conflict set over the hard constraints."""
+def _minimal_core(spec: VirSpec, env: Mapping[Any, Any], violated: Sequence[int]) -> list[int]:
+    """Violated constraints are singleton conflicts under a fixed assignment.
 
-    if not violated:
-        return []
-    outcomes, _ = _collect(spec, env)
-    by_index = {o.index: o for o in outcomes}
-    core: List[int] = []
-    for candidate in violated:
-        remaining = [i for i in violated if i != candidate]
-        if not remaining:
-            core.append(candidate)
-            continue
-        if all(by_index.get(i) is not None and by_index[i].satisfied is True for i in remaining):
-            core.append(candidate)
-    return core or list(violated)
+    This is not a globally minimal UNSAT core of the specification.
+    """
+
+    return list(dict.fromkeys(violated))
+
+
+def _canonical_fields(spec: VirSpec, data: Mapping[str, Any]) -> dict[str, Any]:
+    aliases = spec.field_aliases
+    reverse = {alias: name for name, alias in aliases.items()}
+    out = {}
+    for key, value in data.items():
+        name = reverse.get(key, key)
+        if name in out and out[name] != value:
+            raise InstanceFormatError(f"conflicting alias values for {name!r}")
+        out[name] = value
+    return out
+
+
+def _validate_structure(spec: VirSpec, data: Mapping[str, Any]) -> str | None:
+    if spec.model_schema is None:
+        return None
+    import copy
+
+    from jsonschema import Draft202012Validator, FormatChecker
+    payload = {}
+    for key, value in data.items():
+        name = next((n for n, alias in spec.field_aliases.items() if key == n), key)
+        payload[spec.field_aliases.get(name, key)] = value
+    schema = copy.deepcopy(spec.model_schema)
+    # Missing derived fields are allowed only during the derivation pass.
+    # Presence is checked after derivation; this pass validates supplied values only.
+    schema.pop("required", None)
+    try:
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(_json_data(payload))
+    except Exception as exc:
+        return f"schema validation: {exc}"
+    return None
+
+
+def _validate_structure_required(spec, data):
+    if spec.model_schema is None:
+        return None
+    from jsonschema import Draft202012Validator, FormatChecker
+    try:
+        Draft202012Validator(spec.model_schema, format_checker=FormatChecker()).validate(_json_data(data))
+    except Exception as exc:
+        return f"schema validation: {exc}"
+    return None
+
+
+def _json_data(value):
+    from .json_pda import json_value
+    return parse_json(json_value(value))
 
 
 def verify_values(
@@ -408,22 +451,39 @@ def verify_values(
     """Verify an already-lowered mapping of field values against ``spec``."""
 
     data = dict(values)
-    derived: Dict[str, Any] = {}
-    unresolved: List[str] = []
+    structural_error = _validate_structure(spec, data)
+    if structural_error:
+        return VerificationReport(status=FAIL, model_error=structural_error, values=data,
+                                  spec_digest=_safe_digest(spec))
+    data = _canonical_fields(spec, data)
+    derived: dict[str, Any] = {}
+    unresolved: list[str] = []
     if derive_missing:
         data, unresolved, derived = fill_derived(spec, data, overwrite=False)
+    # Restore aliases for the portable schema, then canonicalize again for VIR.
+    aliased = {spec.field_aliases.get(k, k): v for k, v in data.items()}
+    full_error = _validate_structure_required(spec, aliased)
+    if full_error:
+        reverse = {alias: name for name, alias in spec.field_aliases.items()}
+        missing_required = [reverse.get(k, k) for k in (spec.model_schema or {}).get("required", [])
+                            if reverse.get(k, k) not in data]
+        return VerificationReport(status=INCOMPLETE if "is a required property" in full_error else FAIL,
+                                  model_error=full_error, values=data, derived=derived,
+                                  missing=missing_required, unresolved=unresolved, spec_digest=_safe_digest(spec))
 
-    env: Dict[Any, Any] = {}
-    missing: List[str] = []
+    env: dict[Any, Any] = {}
+    missing: list[str] = []
     for vid, info in spec.variables.items():
         name = info.get("name") or spec.id_to_name.get(vid)
         if name is None:
             continue
-        if name in data and data[name] is not None:
+        if name in data:
             env[vid] = data[name]
             env[name] = data[name]
         else:
-            missing.append(name)
+            field = getattr(spec.model, "model_fields", {}).get(name)
+            if field is None or field.is_required():
+                missing.append(name)
 
     outcomes, preferences = _collect(spec, env)
     violated = [o.index for o in outcomes if o.satisfied is False]
@@ -443,6 +503,27 @@ def verify_values(
     model_error = None
     if status == PASS:
         model, model_error = build_model(spec, data)
+        if model_error:
+            status = FAIL
+        elif model is not None:
+            # Validators/coercers may change values. The returned object, not the
+            # pre-validation dictionary, is the object whose invariants must hold.
+            normalized = extract_data(model)
+            normalized_env = {}
+            for vid, info in spec.variables.items():
+                name = info.get("name") or spec.id_to_name.get(vid)
+                if name in normalized:
+                    normalized_env[vid] = normalized_env[name] = normalized[name]
+            outcomes, preferences = _collect(spec, normalized_env)
+            violated = [o.index for o in outcomes if o.satisfied is False]
+            unknown = [o.index for o in outcomes if o.satisfied is None]
+            if violated:
+                status = FAIL
+            elif unknown:
+                status = INCOMPLETE
+            data = normalized
+            core = _minimal_core(spec, normalized_env, violated)
+            hints = [h for h in (_relaxation_hint(o) for o in outcomes) if h]
 
     spec_hash = None
     try:
@@ -484,8 +565,8 @@ def verify_instance(
 def verify_json(schema_or_spec: Any, text: str) -> VerificationReport:
     spec = _coerce_spec(schema_or_spec)
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = parse_json(text)
+    except (json.JSONDecodeError, JSONSyntaxError) as exc:
         raise InstanceFormatError(f"invalid JSON instance: {exc}") from exc
     if not isinstance(payload, Mapping):
         raise InstanceFormatError("JSON instance must be an object")
@@ -509,11 +590,11 @@ def _coerce_spec(schema_or_spec: Any) -> VirSpec:
     )
 
 
-def describe_spec(spec: VirSpec) -> Dict[str, Any]:
+def describe_spec(spec: VirSpec) -> dict[str, Any]:
     """JSON-able summary used by the CLI and error messages."""
 
     containers = []
-    for cid, info in spec.containers.items():
+    for _cid, info in spec.containers.items():
         containers.append(
             {
                 "name": info.name,
@@ -554,7 +635,7 @@ def describe_spec(spec: VirSpec) -> Dict[str, Any]:
     }
 
 
-def _safe_digest(spec: VirSpec) -> Optional[str]:
+def _safe_digest(spec: VirSpec) -> str | None:
     try:
         from .serde import spec_digest
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
-
 
 class CraneModeController:
     def __init__(self, think_open: str = "<think>", think_close: str = "</think>",
@@ -14,15 +12,15 @@ class CraneModeController:
         self.emit_close = emit_close
         self.mode = "reasoning"  # reasoning | emit
         self.buffer = ""
-        self.mined_equations: List[str] = []
+        self.mined_equations: list[str] = []
         self._cursor = 0
 
     def in_reasoning_scratchpad(self) -> bool:
         return self.mode == "reasoning"
 
-    def feed(self, text: str) -> List[str]:
+    def feed(self, text: str) -> list[str]:
         self.buffer += text
-        events: List[str] = []
+        events: list[str] = []
         while True:
             candidates = []
             for tag, kind in ((self.think_open, "open"), (self.think_close, "close"),
@@ -51,7 +49,7 @@ class CraneModeController:
             self._cursor = idx + len(tag)
         return events
 
-    def passive_mine(self, text: str) -> List[str]:
+    def passive_mine(self, text: str) -> list[str]:
         found = []
         for line in text.splitlines():
             s = line.strip()

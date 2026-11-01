@@ -8,16 +8,16 @@ Sharpe) with ``vt.require`` (simplex, concentration limits, no-arbitrage bounds)
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # covariance / quadratic forms
 # ---------------------------------------------------------------------------
 
-def covariance_labels(cov: Mapping[Any, float]) -> List[Any]:
-    labels: List[Any] = []
+def covariance_labels(cov: Mapping[Any, float]) -> list[Any]:
+    labels: list[Any] = []
     for key in cov:
         first = key[0] if isinstance(key, tuple) and len(key) == 2 else key
         if first not in labels:
@@ -25,7 +25,7 @@ def covariance_labels(cov: Mapping[Any, float]) -> List[Any]:
     return labels
 
 
-def covariance_matrix(labels: Sequence[Any], cov: Mapping[Any, float]) -> List[List[float]]:
+def covariance_matrix(labels: Sequence[Any], cov: Mapping[Any, float]) -> list[list[float]]:
     """Build a symmetric matrix over ``labels`` from a triangular covariance map."""
 
     index = {label: i for i, label in enumerate(labels)}
@@ -55,7 +55,7 @@ def quad_form(weights: Mapping[str, float], cov: Mapping[Any, float]) -> float:
     return total
 
 
-def cholesky(matrix: Sequence[Sequence[float]]) -> Optional[List[List[float]]]:
+def cholesky(matrix: Sequence[Sequence[float]]) -> list[list[float]] | None:
     n = len(matrix)
     lower = [[0.0] * n for _ in range(n)]
     for i in range(n):
@@ -74,17 +74,42 @@ def cholesky(matrix: Sequence[Sequence[float]]) -> Optional[List[List[float]]]:
 
 
 def is_positive_semidefinite(matrix: Sequence[Sequence[float]], tol: float = 1e-9) -> bool:
+    """Symmetric PSD test via an LDL^T-style factorization (no ridge laundering).
+
+    Singular PSD matrices are accepted; a negative pivot beyond ``tol`` is rejected.
+    """
     n = len(matrix)
     if n == 0 or any(len(row) != n for row in matrix):
         return False
-    # Symmetry + Cholesky (rejecting singular matrices is conservative but strict PSD can
-    # be checked by adding a tiny ridge).
+    try:
+        a = [[float(matrix[i][j]) for j in range(n)] for i in range(n)]
+    except (TypeError, ValueError):
+        return False
+    if any(not math.isfinite(x) for row in a for x in row):
+        return False
     for i in range(n):
-        for j in range(n):
-            if abs(matrix[i][j] - matrix[j][i]) > 1e-11:
+        for j in range(i):
+            if abs(a[i][j] - a[j][i]) > tol:
                 return False
-    ridge = [[float(matrix[i][j]) + (tol if i == j else 0.0) for j in range(n)] for i in range(n)]
-    return cholesky(ridge) is not None
+    lower = [[0.0] * n for _ in range(n)]
+    diag = [0.0] * n
+    for i in range(n):
+        value = a[i][i] - sum(lower[i][k] * lower[i][k] * diag[k] for k in range(i))
+        if value < -tol:
+            return False
+        if abs(value) <= tol:
+            # Zero pivot: the remaining Schur-complement row must also be zero.
+            for j in range(i + 1, n):
+                residual = a[j][i] - sum(lower[j][k] * lower[i][k] * diag[k] for k in range(i))
+                if abs(residual) > tol:
+                    return False
+            diag[i] = 0.0
+            continue
+        diag[i] = value
+        for j in range(i + 1, n):
+            residual = a[j][i] - sum(lower[j][k] * lower[i][k] * diag[k] for k in range(i))
+            lower[j][i] = residual / value
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +124,7 @@ class PortfolioStats:
     variance: float
     risk_free: float
 
-    def as_dict(self) -> Dict[str, float]:
+    def as_dict(self) -> dict[str, float]:
         return {
             "expected_return": self.expected_return,
             "volatility": self.volatility,
@@ -111,7 +136,7 @@ class PortfolioStats:
 
 def portfolio_weights_valid(
     weights: Mapping[str, float],
-    allowed: Optional[Iterable[str]] = None,
+    allowed: Iterable[str] | None = None,
     lo: float = 0.05,
     hi: float = 0.50,
     total: float = 1.0,
@@ -190,7 +215,7 @@ def implied_volatility(
     is_call: bool = True,
     tol: float = 1e-10,
     max_iterations: int = 200,
-) -> Optional[float]:
+) -> float | None:
     """Bisection on a monotone Black–Scholes price; ``None`` if no root exists."""
 
     if price <= 0 or T <= 0 or S <= 0 or K <= 0:
@@ -245,9 +270,8 @@ def double_entry_balanced(debits: Sequence[float], credits: Sequence[float], tol
 
 
 # legacy alias used by the handbook
-sharpe_ratio = lambda expected_return, volatility, rf=0.04: (
-    float("inf") if volatility == 0 else (expected_return - rf) / volatility
-)
+def sharpe_ratio(expected_return, volatility, rf=0.04):
+    return float("inf") if volatility == 0 else (expected_return - rf) / volatility
 
 
 __all__ = [

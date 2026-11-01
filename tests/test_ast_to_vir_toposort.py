@@ -3,10 +3,13 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import veritas as vt
 from pydantic import BaseModel, Field
+
+import veritas as vt
 
 
 class SimpleModel(BaseModel):
@@ -84,7 +87,6 @@ def test_preflight_unsat_simple():
         x: float = 0.0
 
     # infeasible bounds
-    spec_holder = {}
 
     class Infeasible(Exception):
         pass
@@ -126,22 +128,28 @@ def test_zero_dof_rules_present():
 
 
 def test_quad_form_cholesky():
-    import numpy as np
-    L = np.linalg.cholesky(np.array([[0.048, 0.031, 0.042],
-                                     [0.031, 0.039, 0.036],
-                                     [0.042, 0.036, 0.095]]))
-    # at least one rule with cholesky_l non-empty
+    # The compiler's Cholesky path is pure Python; NumPy is not a test dependency.
     @vt.verified_schema()
     def vp(p: PortfolioAllocation):
         vt.derive(p.volatility == vt.sqrt(vt.quad_form(p.weights, COV_MATRIX)), tol=1e-5)
 
-    rule_exprs = [r.rhs_expr for r in vp.spec.zero_dof_rules]
-    # find quad_form expr
+    expected = [
+        [0.048, 0.031, 0.042],
+        [0.031, 0.039, 0.036],
+        [0.042, 0.036, 0.095],
+    ]
     found = False
     for e in vp.spec.derives:
         if e.kind == "compare" and e.rhs is not None and e.rhs.kind == "sqrt":
             inner = e.rhs.args[0] if e.rhs.args else None
             if inner is not None and inner.kind == "quad_form_cholesky":
                 found = True
-                assert len(inner.cholesky_l) > 0
+                factor = inner.cholesky_l
+                assert len(factor) == len(expected)
+                for i, row in enumerate(factor):
+                    assert len(row) == len(expected)
+                    assert all(value == 0.0 for value in row[i + 1:])
+                    for j in range(i + 1):
+                        reconstructed = sum(factor[i][k] * factor[j][k] for k in range(j + 1))
+                        assert reconstructed == pytest.approx(expected[i][j], abs=1e-12)
     assert found is True

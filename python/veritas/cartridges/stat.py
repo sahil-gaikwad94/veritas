@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set
+from collections.abc import Iterable, Mapping, Sequence
 
 
 def probability_simplex(probs: Sequence[float], tol: float = 1e-9) -> bool:
@@ -53,8 +53,8 @@ def joint_table_valid(table: Sequence[Sequence[float]], tol: float = 1e-9) -> bo
     return bool(flat) and probability_simplex(flat, tol)
 
 
-def _parents(graph: Mapping[str, Iterable[str]]) -> Dict[str, Set[str]]:
-    parents: Dict[str, Set[str]] = {node: set() for node in graph}
+def _parents(graph: Mapping[str, Iterable[str]]) -> dict[str, set[str]]:
+    parents: dict[str, set[str]] = {node: set() for node in graph}
     for child, deps in graph.items():
         for parent in deps:
             parents.setdefault(child, set()).add(parent)
@@ -62,8 +62,8 @@ def _parents(graph: Mapping[str, Iterable[str]]) -> Dict[str, Set[str]]:
     return parents
 
 
-def _ancestors(parents: Dict[str, Set[str]], seeds: Set[str]) -> Set[str]:
-    found: Set[str] = set()
+def _ancestors(parents: dict[str, set[str]], seeds: set[str]) -> set[str]:
+    found: set[str] = set()
     stack = list(seeds)
     while stack:
         node = stack.pop()
@@ -95,7 +95,7 @@ def is_d_separated(
     if not (xs | ys | zs).issubset(nodes):
         return False
     ancestral = _ancestors(parents, xs | ys | zs)
-    adjacency: Dict[str, Set[str]] = {node: set() for node in ancestral}
+    adjacency: dict[str, set[str]] = {node: set() for node in ancestral}
     for child in ancestral:
         ps = [p for p in parents.get(child, set()) if p in ancestral]
         for parent in ps:

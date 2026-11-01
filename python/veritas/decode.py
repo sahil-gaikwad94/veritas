@@ -24,13 +24,14 @@ import math
 import random
 import re
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any
 
-from .cdcl_jumpback import CdclJumpbackEngine, ClauseCheckpoint, ConflictBranchRecord
-from .compiler.vir import ContainerInfo, VirExpr, VirSpec
-from .evaluate import as_number, collect_var_ids, eval_expr, expr_to_str, format_number
-from .instance import VerificationReport, _coerce_spec, describe_spec, verify_values
+from .cdcl_jumpback import CdclJumpbackEngine, ClauseCheckpoint
+from .compiler.vir import ContainerInfo, VirSpec, VirType
+from .evaluate import as_number, collect_var_ids
+from .instance import VerificationError, VerificationReport, _coerce_spec, verify_values
 from .interval import Hc4AffineContractor, Interval
 from .json_pda import (
     JSONPushdownAutomaton,
@@ -41,7 +42,7 @@ from .json_pda import (
 )
 from .linear import compile_clauses, simplify_clause
 from .proof.certificate import ProofCertificate, VerifiedResult, build_certificate
-from .rl.collector import VeritasRLCollector
+from .rl.collector import ConflictBranchRecord, VeritasRLCollector
 from .serde import spec_digest
 from .zero_dof import ZeroDofEngine
 
@@ -60,7 +61,7 @@ class ModelProtocolError(DecodeError):
 
 
 class DeadEnd(DecodeError):
-    def __init__(self, field_name: Optional[str], reason: str):
+    def __init__(self, field_name: str | None, reason: str):
         self.field_name = field_name
         self.reason = reason
         super().__init__(f"dead end at {field_name!r}: {reason}")
@@ -76,7 +77,7 @@ class DecodeConfig:
     max_string_length: int = 64
     allow_exponent: bool = False
     volume_twist_beta: float = 0.0
-    seed: Optional[int] = 0
+    seed: int | None = 0
     derive_missing: bool = True
     enforce_grammar: bool = True
 
@@ -94,7 +95,7 @@ class StepTrace:
     entropy: float = 0.0
     note: str = ""
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "step": self.step,
             "attempt": self.attempt,
@@ -118,13 +119,13 @@ class DecodeTelemetry:
     jump_forward_fields: int = 0
     jump_forward_chars: int = 0
     backtracks: int = 0
-    backtrack_fields: List[str] = field(default_factory=list)
-    domain_cuts: List[Dict[str, Any]] = field(default_factory=list)
+    backtrack_fields: list[str] = field(default_factory=list)
+    domain_cuts: list[dict[str, Any]] = field(default_factory=list)
     elapsed_ms: float = 0.0
     final_status: str = ""
     spec_digest: str = ""
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         payload = dict(self.__dict__)
         payload["backtrack_fields"] = list(self.backtrack_fields)
         payload["domain_cuts"] = list(self.domain_cuts)
@@ -135,10 +136,10 @@ class DecodeTelemetry:
 @dataclass
 class DecodeResult:
     text: str
-    values: Dict[str, Any]
+    values: dict[str, Any]
     report: VerificationReport
     telemetry: DecodeTelemetry
-    trace: List[StepTrace]
+    trace: list[StepTrace]
     attempts: int = 1
     model_name: str = ""
     prompt: str = ""
@@ -147,7 +148,7 @@ class DecodeResult:
     def ok(self) -> bool:
         return self.report.status == "PASS"
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "text": self.text,
             "values": self.values,
@@ -166,54 +167,55 @@ class VeritasSession:
         self,
         schema_or_spec: Any,
         model: Any = None,
-        config: Optional[DecodeConfig] = None,
+        config: DecodeConfig | None = None,
     ):
         self.spec: VirSpec = _coerce_spec(schema_or_spec)
         self.model = model
         self.config = config or DecodeConfig()
         self.rng = random.Random(self.config.seed)
         self.telemetry = DecodeTelemetry(spec_digest=spec_digest(self.spec))
-        self.trace: List[StepTrace] = []
+        self.trace: list[StepTrace] = []
         self.prompt = ""
         self.zero = ZeroDofEngine.from_spec(self.spec)
         self.cdcl = CdclJumpbackEngine()
         self.rl = VeritasRLCollector()
+        self._pending_conflicts = []
 
         names = list(self.spec.field_order)
         for name in self.spec.name_to_id:
             if name not in names:
                 names.append(name)
-        self.fields: List[str] = [n for n in names if n in self.spec.name_to_id]
-        self.vid: Dict[str, int] = {n: self.spec.name_to_id[n] for n in self.fields}
-        self.types: Dict[str, Any] = {
+        self.fields: list[str] = [n for n in names if n in self.spec.name_to_id]
+        self.vid: dict[str, int] = {n: self.spec.name_to_id[n] for n in self.fields}
+        self.types: dict[str, Any] = {
             n: (self.spec.variables.get(self.vid[n]) or {}).get("type") for n in self.fields
         }
         self.rules = {r.target_json_key: r for r in self.spec.zero_dof_rules if r.target_json_key}
-        self.containers: Dict[str, ContainerInfo] = {
+        self.containers: dict[str, ContainerInfo] = {
             info.name: info for info in self.spec.containers.values() if info.name
         }
         self.clauses = compile_clauses(self.spec)
-        self._field_clause_index: Dict[str, int] = {}
+        self._field_clause_index: dict[str, int] = {}
         for clause in self.clauses:
             for vid in collect_var_ids(clause.expr):
                 name = self.spec.id_to_name.get(vid)
                 if name and name not in self._field_clause_index:
                     self._field_clause_index[name] = clause.index
 
-        self.values: Dict[str, Any] = {}
+        self.values: dict[str, Any] = {}
         self.text = ""
         self._attempt = 0
         self._step = 0
-        self._partial_numeric: Dict[str, float] = {}
-        self._attempt_checkpoints: List[ClauseCheckpoint] = []
-        self._overrides: Dict[str, Tuple[float, float]] = {}
-        self._elem_overrides: Dict[Tuple[str, str], Tuple[float, float]] = {}
-        self._tabu: Dict[Any, Set[float]] = {}
-        self._cut_direction: Dict[str, int] = {}
+        self._partial_numeric: dict[str, float] = {}
+        self._attempt_checkpoints: list[ClauseCheckpoint] = []
+        self._overrides: dict[str, tuple[float, float]] = {}
+        self._elem_overrides: dict[tuple[str, str], tuple[float, float]] = {}
+        self._tabu: dict[Any, set[float]] = {}
+        self._cut_direction: dict[str, int] = {}
         self.contractor = self._build_contractor()
         # Snapshot of the feasible box *before* any assignment; domain cuts are computed
         # against this, never against a committed singleton.
-        self._initial_domains: Dict[int, Interval] = {
+        self._initial_domains: dict[int, Interval] = {
             key: Interval(bound.lo, bound.hi) for key, bound in self.contractor.domains.items()
         }
 
@@ -262,7 +264,7 @@ class VeritasSession:
             )
         self.prompt = prompt or ""
         start = time.perf_counter()
-        best: Optional[DecodeResult] = None
+        best: DecodeResult | None = None
         attempts = 0
         for attempt in range(self.config.max_backtracks + 1):
             attempts = attempt + 1
@@ -285,6 +287,10 @@ class VeritasSession:
             self.telemetry.solver_checks += 1
             result = self._finalize(text, report, attempts, model, start)
             if report.status == "PASS":
+                for conflict in self._pending_conflicts:
+                    if not conflict.chosen:
+                        self.rl.record_repair(conflict, result.text)
+                self._pending_conflicts.clear()
                 return result
             if best is None or len(report.violations) < len(best.report.violations):
                 best = result
@@ -315,6 +321,7 @@ class VeritasSession:
         self._step = 0
         self._partial_numeric = {}
         self._attempt_checkpoints = []
+        self._pending_conflicts = []
         self.contractor = self._build_contractor()
 
     def _next_step(self) -> int:
@@ -398,9 +405,9 @@ class VeritasSession:
                     )
         return value
 
-    def _upstream_free_field(self, name: str) -> Optional[str]:
+    def _upstream_free_field(self, name: str) -> str | None:
         rule = self.rules.get(name)
-        upstream: List[str] = []
+        upstream: list[str] = []
         if rule is not None:
             for dep in rule.input_vars:
                 dep_name = self.spec.id_to_name.get(dep) if isinstance(dep, int) else str(dep)
@@ -444,15 +451,21 @@ class VeritasSession:
             self.text += choice
             self._record(StepTrace, name, choice)
             return mapping[choice]
+        if kind == "object":
+            return self._emit_object(name, vtype, model)
         if kind in _CONTAINER_KINDS:
             return self._emit_container(name, model)
-        # string / unsupported scalar types: a bounded-free string is safe and honest.
-        value = self._emit_string(name, model)
-        self.text += json_value(value)
-        return value
+        if kind == "null":
+            self.text += "null"
+            return None
+        if kind == "string":
+            value = self._emit_string(name, model)
+            self.text += json_value(value)
+            return value
+        raise DeadEnd(name, f"unsupported field type {kind!r} for constrained decoding")
 
     def _emit_string(self, name: str, model: Any) -> str:
-        chars: List[str] = []
+        chars: list[str] = []
         for _ in range(self.config.max_string_length + 1):
             actions = [chr(c) for c in range(0x20, 0x7F) if chr(c) not in {'"', "\\"}]
             stop_ok = len(chars) >= 1
@@ -487,7 +500,7 @@ class VeritasSession:
     # ------------------------------------------------------------------
     # numeric emission
     # ------------------------------------------------------------------
-    def _declared_bounds(self, name: str) -> Tuple[float, float]:
+    def _declared_bounds(self, name: str) -> tuple[float, float]:
         """Type bounds plus domain cuts, *without* the current contractor assignment.
 
         Cuts must be computed against the declared box: once a field has been assigned,
@@ -510,7 +523,7 @@ class VeritasSession:
             hi = min(hi, override[1])
         return lo, hi
 
-    def _bounds(self, name: str) -> Tuple[float, float]:
+    def _bounds(self, name: str) -> tuple[float, float]:
         lo, hi = self._declared_bounds(name)
         vid = self.vid.get(name)
         if vid is not None and vid in self.contractor.domains:
@@ -524,11 +537,11 @@ class VeritasSession:
         self,
         name: str,
         model: Any,
-        bounds: Tuple[float, float],
+        bounds: tuple[float, float],
         *,
         int_only: bool = False,
         tabu_key: Any = None,
-    ) -> Tuple[str, float]:
+    ) -> tuple[str, float]:
         lo, hi = bounds
         if lo > hi + 1e-12:
             raise DeadEnd(name, f"empty numeric domain [{lo:g}, {hi:g}]")
@@ -539,7 +552,7 @@ class VeritasSession:
             local_steps += 1
             if local_steps > self.config.max_steps or self._step > self.config.max_steps:
                 raise DeadEnd(name, "step budget exhausted")
-            actions: List[str] = []
+            actions: list[str] = []
             for ch in "0123456789.-":
                 candidate = prefix + ch
                 if not self._number_prefix_ok(candidate, int_only):
@@ -627,19 +640,126 @@ class VeritasSession:
     # ------------------------------------------------------------------
     # container emission (AGDecode residual accumulator)
     # ------------------------------------------------------------------
-    def _emit_container(self, name: str, model: Any) -> Dict[str, Any]:
-        info = self.containers[name]
+    def _emit_object(self, name: str, vtype: Any, model: Any) -> dict[str, Any]:
+        properties = getattr(vtype, "properties", {}) or {}
+        required = list(getattr(vtype, "required", []) or list(properties))
+        self.text += "{"
+        result: dict[str, Any] = {}
+        for index, key in enumerate(required):
+            if key not in properties:
+                raise DeadEnd(name, f"required property {key!r} has no type information")
+            if index:
+                self.text += ", "
+            self.text += json_value(key) + ": "
+            result[key] = self._emit_value(f"{name}.{key}", properties[key], model)
+        self.text += "}"
+        self._record(StepTrace, name, "{}", kind="close", note=f"object with {len(result)} properties")
+        return result
+
+    def _emit_value(self, path: str, vtype: Any, model: Any) -> Any:
+        kind = getattr(vtype, "kind", "any")
+        if getattr(vtype, "nullable", False) and kind not in ("null",):
+            # Deterministic reference policy: prefer a concrete value when one is
+            # representable; null remains available to the final verifier.
+            pass
+        if kind == "object":
+            return self._emit_object(path, vtype, model)
+        if kind in _CONTAINER_KINDS:
+            return self._emit_container(path, model, vtype=vtype)
+        if kind in ("real", "float", "number", "int"):
+            lo = getattr(vtype, "min", None)
+            hi = getattr(vtype, "max", None)
+            lo = float(lo) if lo is not None else float("-inf")
+            hi = float(hi) if hi is not None else float("inf")
+            _text, value = self._emit_number(path, model, (lo, hi), int_only=(kind == "int"), tabu_key=path)
+            return int(round(value)) if kind == "int" else value
+        if kind == "bool":
+            choice = self._pick_strings(path, model, ["true", "false"])
+            self.text += choice
+            return choice == "true"
+        if kind == "finite_set":
+            universe = list(getattr(vtype, "universe", None) or [])
+            if not universe:
+                raise DeadEnd(path, "finite-set field has an empty universe")
+            actions = [json_value(v) for v in universe]
+            choice = self._pick_strings(path, model, actions)
+            self.text += choice
+            return universe[actions.index(choice)]
+        if kind == "null":
+            self.text += "null"
+            return None
+        if kind == "string":
+            value = self._emit_string(path, model)
+            self.text += json_value(value)
+            return value
+        raise DeadEnd(path, f"unsupported nested type {kind!r}")
+
+    def _emit_list(self, name: str, model: Any, vtype: Any) -> list[Any]:
+        item_type = getattr(vtype, "item_type", None)
+        min_len = int(getattr(vtype, "min_len", 0) or 0)
+        max_len = getattr(vtype, "max_len", None)
+        length = min_len if max_len is None else min(min_len, int(max_len))
+        if max_len is not None and min_len > int(max_len):
+            raise DeadEnd(name, "list min_items exceeds max_items")
+        self.text += "["
+        result: list[Any] = []
+        info = self.containers.get(name)
+        numeric_item = item_type is None or getattr(item_type, "kind", "real") in ("real", "int", "float", "number", "any")
+        total = 0.0
+        for index in range(length):
+            if index:
+                self.text += ", "
+            if numeric_item and info is not None:
+                lo, hi = self._element_bounds(name, str(index), info, total, index)
+                _text, value = self._emit_number(name, model, (lo, hi), tabu_key=(name, index))
+                total += value
+                result.append(value)
+            else:
+                result.append(self._emit_value(f"{name}[{index}]", item_type or VirType(), model))
+        self.text += "]"
+        self._record(StepTrace, name, "[]", kind="close", note=f"list with {len(result)} items")
+        return result
+
+    def _emit_container(self, name: str, model: Any, vtype: Any = None) -> Any:
+        info = self.containers.get(name)
+        if vtype is None and info is not None:
+            vtype = self.types.get(name)
+        container_kind = getattr(vtype, "container_kind", "dict") if vtype is not None else "dict"
+        if container_kind == "list":
+            return self._emit_list(name, model, vtype)
+        if info is None:
+            # Nested dict without analysis: emit an empty object only when allowed.
+            min_len = int(getattr(vtype, "min_len", 0) or 0)
+            if min_len:
+                raise DeadEnd(name, "cannot synthesize required keys for an unconstrained dictionary")
+            self.text += "{}"
+            return {}
         keys = list(info.universe or [])
+        item_type = getattr(vtype, "item_type", None)
+        numeric_item = item_type is None or getattr(item_type, "kind", "real") in ("real", "int", "float", "number", "any")
         if not keys:
+            min_len = max(0, info.min_len)
+            if min_len:
+                raise DeadEnd(name, "cannot synthesize required keys for an unconstrained dictionary")
             self.text += "{}"
             self._record(StepTrace, name, "{}", kind="close",
                          note="no key universe declared; emitting an empty container")
             return {}
+        if not numeric_item:
+            self.text += "{"
+            result: dict[str, Any] = {}
+            for index, key in enumerate(keys):
+                if index:
+                    self.text += ", "
+                self.text += json_value(key) + ": "
+                result[key] = self._emit_value(f"{name}.{key}", item_type, model)
+            self.text += "}"
+            return result
         self.text += "{"
         total = 0.0
         emitted = 0
         first = True
-        result: Dict[str, Any] = {}
+        result: dict[str, Any] = {}
         for key in keys:
             if emitted >= max(0, info.min_len) and self._can_close(info, total, emitted):
                 break
@@ -677,7 +797,7 @@ class VeritasSession:
         info: ContainerInfo,
         total: float,
         emitted: int,
-    ) -> Tuple[float, float]:
+    ) -> tuple[float, float]:
         if info.target_sum is None:
             lo, hi = info.elem_min, info.elem_max
         else:
@@ -693,12 +813,19 @@ class VeritasSession:
         return lo, hi
 
     def _can_close(self, info: ContainerInfo, total: float, emitted: int) -> bool:
-        if emitted < max(0, info.min_len):
+        lo, hi = info.cardinality_bounds()
+        if emitted < lo or (hi is not None and emitted > hi):
             return False
         if info.target_sum is None:
-            return emitted >= max(1, info.min_len)
+            return True
         tolerance = max(info.sum_tol, 1e-9)
-        return abs(info.target_sum - total) <= tolerance
+        if info.sum_op == "eq":
+            return abs(info.target_sum - total) <= tolerance
+        if info.sum_op in ("le", "lt"):
+            return total <= info.target_sum + tolerance
+        if info.sum_op in ("ge", "gt"):
+            return total >= info.target_sum - tolerance
+        return False
 
     # ------------------------------------------------------------------
     # sampling
@@ -732,7 +859,7 @@ class VeritasSession:
         self._last_entropy = entropy
         return choice
 
-    def _select(self, actions: Sequence[str], scores: Sequence[float]) -> Tuple[float, str]:
+    def _select(self, actions: Sequence[str], scores: Sequence[float]) -> tuple[float, str]:
         probabilities = _softmax(scores)
         entropy = _entropy(probabilities)
         if self.config.temperature <= 0:
@@ -822,12 +949,16 @@ class VeritasSession:
             unsat_core_ids=list(report.unsat_core),
             violation_margin=abs(report.violations[0].residual) if report.violations and report.violations[0].residual is not None else 0.0,
         )
+        record.prompt = self.prompt
+        record.rejected = text
+        record.metadata.setdefault("spec_digest", self.telemetry.spec_digest)
+        self._pending_conflicts.append(record)
         self.rl.record_conflict_branch(None, None, report.unsat_core, record=record)
         return self._cut_for_field(culprit_name)
 
-    def _culprit_from_report(self, report: VerificationReport) -> Optional[str]:
+    def _culprit_from_report(self, report: VerificationReport) -> str | None:
         by_index = {clause.index: clause for clause in self.clauses}
-        candidates: List[str] = []
+        candidates: list[str] = []
         for outcome in report.violations:
             clause = by_index.get(outcome.index)
             if clause is None:
@@ -842,7 +973,7 @@ class VeritasSession:
             return None
         return candidates[-1]
 
-    def _cut_for_field(self, name: Optional[str]) -> bool:
+    def _cut_for_field(self, name: str | None) -> bool:
         if name is None:
             return False
         if name in self.rules:
@@ -921,7 +1052,7 @@ class VeritasSession:
 # helpers
 # ---------------------------------------------------------------------------
 
-def _softmax(scores: Sequence[float]) -> List[float]:
+def _softmax(scores: Sequence[float]) -> list[float]:
     if not scores:
         return []
     finite = [s for s in scores if math.isfinite(s)]
@@ -949,14 +1080,14 @@ def _entropy(probabilities: Sequence[float]) -> float:
 
 def generate(
     model: Any = None,
-    prompt: Optional[str] = None,
+    prompt: str | None = None,
     spec: Any = None,
     return_proof: bool = False,
     *,
     tokenizer: Any = None,
-    config: Optional[DecodeConfig] = None,
-    max_backtracks: Optional[int] = None,
-    temperature: Optional[float] = None,
+    config: DecodeConfig | None = None,
+    max_backtracks: int | None = None,
+    temperature: float | None = None,
     **kwargs: Any,
 ) -> VerifiedResult:
     """Run constrained decoding for ``spec`` and return a verified result.
@@ -980,7 +1111,7 @@ def generate(
         cfg.temperature = float(temperature)
     session = VeritasSession(spec, model, cfg)
     result = session.run(model, prompt=prompt or "")
-    proof: Optional[ProofCertificate] = None
+    proof: ProofCertificate | None = None
     if return_proof and result.report.status == "PASS":
         proof = build_certificate(
             spec,
@@ -991,6 +1122,8 @@ def generate(
                 "attempts": result.attempts,
             },
         )
+    if result.report.status != "PASS":
+        raise VerificationError(result.report)
     value: Any = result.report.model if result.report.model is not None else result.values
     return VerifiedResult(
         value=value,

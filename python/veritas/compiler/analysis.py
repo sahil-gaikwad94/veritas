@@ -13,14 +13,14 @@ arity the user never wrote.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from .vir import ContainerInfo, VirExpr, VirSpec
 
 _CONTAINER_KINDS = ("dynamic_map", "list", "dict", "set")
 
 
-def _is_container_var(expr: Optional[VirExpr], containers: Dict[int, str]) -> Optional[int]:
+def _is_container_var(expr: VirExpr | None, containers: dict[int, str]) -> int | None:
     if expr is None or getattr(expr, "kind", None) != "var":
         return None
     vid = getattr(expr, "var_id", None)
@@ -29,7 +29,7 @@ def _is_container_var(expr: Optional[VirExpr], containers: Dict[int, str]) -> Op
     return vid if vid in containers else None
 
 
-def _unwrap_values(expr: Optional[VirExpr]) -> Optional[VirExpr]:
+def _unwrap_values(expr: VirExpr | None) -> VirExpr | None:
     """Return the underlying container for ``x.values()`` / bare ``x``."""
 
     if expr is None:
@@ -40,7 +40,7 @@ def _unwrap_values(expr: Optional[VirExpr]) -> Optional[VirExpr]:
     return expr
 
 
-def _elem_names(expr: Optional[VirExpr], out: Optional[set] = None) -> set:
+def _elem_names(expr: VirExpr | None, out: set | None = None) -> set:
     out = out if out is not None else set()
     if expr is None or not hasattr(expr, "kind"):
         return out
@@ -59,7 +59,7 @@ def _elem_names(expr: Optional[VirExpr], out: Optional[set] = None) -> set:
     return out
 
 
-def _const_number(expr: Optional[VirExpr]) -> Optional[float]:
+def _const_number(expr: VirExpr | None) -> float | None:
     if expr is None:
         return None
     if getattr(expr, "kind", None) in ("const_real", "const_int"):
@@ -86,7 +86,7 @@ def _apply_element_comparison(
     rhs = getattr(expr, "rhs", None)
     op = getattr(expr, "op", "eq")
 
-    def touches_elem(node: Optional[VirExpr]) -> bool:
+    def touches_elem(node: VirExpr | None) -> bool:
         return (
             node is not None
             and getattr(node, "kind", None) == "elem"
@@ -147,8 +147,8 @@ def _scan_sum(info: ContainerInfo, expr: VirExpr) -> None:
     lhs = getattr(expr, "lhs", None)
     rhs = getattr(expr, "rhs", None)
     op = getattr(expr, "op", "eq")
-    target: Optional[float] = None
-    total_expr: Optional[VirExpr] = None
+    target: float | None = None
+    total_expr: VirExpr | None = None
     if lhs is not None and getattr(lhs, "kind", None) == "sum":
         total_expr = lhs
         target = _const_number(rhs)
@@ -162,19 +162,15 @@ def _scan_sum(info: ContainerInfo, expr: VirExpr) -> None:
     vid = _is_container_var(inner, {info.var_id: info.name})
     if vid is None:
         return
-    # Only equality gives a residual accumulator with a meaningful closed form; the
-    # one-sided cases still bound feasibility and are recorded via the sum target.
-    if op == "eq":
-        info.target_sum = target
-        info.sum_tol = max(info.sum_tol, float(getattr(expr, "tol", 1e-6) or 1e-6))
-    else:
-        info.target_sum = target
+    info.target_sum = target
+    info.sum_op = op
+    info.sum_tol = float(getattr(expr, "tol", 0.0) or 0.0) if op == "eq" else 0.0
 
 
-def analyze_containers(spec: VirSpec) -> Dict[int, ContainerInfo]:
+def analyze_containers(spec: VirSpec) -> dict[int, ContainerInfo]:
     """Infer container facts from the spec's compiled constraints."""
 
-    containers: Dict[int, ContainerInfo] = {}
+    containers: dict[int, ContainerInfo] = {}
     for vid, info in spec.variables.items():
         vtype = info.get("type")
         kind = getattr(vtype, "kind", "any")
@@ -190,6 +186,7 @@ def analyze_containers(spec: VirSpec) -> Dict[int, ContainerInfo]:
             universe=list(vtype.universe) if getattr(vtype, "universe", None) else None,
             min_len=min_len,
             max_len=int(raw_max) if raw_max and raw_max > 0 else None,
+            container_kind=getattr(vtype, "container_kind", "dict"),
             elem_min=float(val_min) if val_min is not None else float("-inf"),
             elem_max=float(val_max) if val_max is not None else float("inf"),
         )
@@ -199,20 +196,41 @@ def analyze_containers(spec: VirSpec) -> Dict[int, ContainerInfo]:
 
     for expr in spec.requires:
         kind = getattr(expr, "kind", None)
+        if kind == "and":
+            stack = list(expr.args)
+            while stack:
+                child = stack.pop()
+                if child.kind == "and":
+                    stack.extend(child.args)
+                elif child.kind == "keys_subset":
+                    vid = _is_container_var(child.args[0] if child.args else None, containers)
+                    allowed = child.value
+                    if vid is not None and isinstance(allowed, (set, frozenset, list, tuple)):
+                        info = containers[vid]
+                        keys = sorted(set(allowed))
+                        info.universe = sorted(set(info.universe) & set(keys)) if info.universe is not None else keys
+                        info.max_len = len(info.universe) if info.max_len is None else min(info.max_len, len(info.universe))
+                elif child.kind == "forall":
+                    inner = _unwrap_values(child.iterable)
+                    vid = _is_container_var(inner, containers)
+                    if vid is not None:
+                        _scan_forall(containers[vid], child)
+            continue
         if kind == "keys_subset":
             args = getattr(expr, "args", []) or []
             vid = _is_container_var(args[0] if args else None, containers)
             allowed = getattr(expr, "value", None)
             if vid is not None and allowed is not None:
                 try:
-                    universe = sorted(str(k) for k in allowed)
+                    if any(not isinstance(k, str) for k in allowed):
+                        raise TypeError("JSON dictionary keys must be strings")
+                    universe = sorted(allowed)
                 except TypeError:
                     universe = None
                 if universe:
                     info = containers[vid]
-                    info.universe = universe
-                    if info.max_len is None or info.max_len > len(universe):
-                        info.max_len = len(universe)
+                    info.universe = sorted(set(info.universe) & set(universe)) if info.universe is not None else universe
+                    info.max_len = len(info.universe) if info.max_len is None else min(info.max_len, len(info.universe))
         elif kind == "forall":
             iterable = _unwrap_values(getattr(expr, "iterable", None))
             vid = _is_container_var(iterable, containers)
@@ -229,7 +247,7 @@ def analyze_containers(spec: VirSpec) -> Dict[int, ContainerInfo]:
         # Conjunctions are lowered as a single compare only when chained; nested calls
         # are separate top-level require() statements, so no recursion is needed here.
 
-    for vid, info in containers.items():
+    for _vid, info in containers.items():
         if not math.isfinite(info.elem_min):
             info.elem_min = float("-inf")
         if not math.isfinite(info.elem_max):
@@ -239,19 +257,19 @@ def analyze_containers(spec: VirSpec) -> Dict[int, ContainerInfo]:
     return containers
 
 
-def container_for(spec: VirSpec, var_id: Any) -> Optional[ContainerInfo]:
+def container_for(spec: VirSpec, var_id: Any) -> ContainerInfo | None:
     return spec.containers.get(var_id) if isinstance(var_id, int) else None
 
 
-def container_for_name(spec: VirSpec, name: str) -> Optional[ContainerInfo]:
+def container_for_name(spec: VirSpec, name: str) -> ContainerInfo | None:
     vid = spec.name_to_id.get(name)
     return spec.containers.get(vid) if vid is not None else None
 
 
-def container_feasibility(spec: VirSpec) -> List[Tuple[int, str]]:
+def container_feasibility(spec: VirSpec) -> list[tuple[int, str]]:
     """Return ``(constraint_index, reason)`` for provably infeasible container specs."""
 
-    problems: List[Tuple[int, str]] = []
+    problems: list[tuple[int, str]] = []
     if not spec.containers:
         return problems
     for index, expr in enumerate(spec.requires):

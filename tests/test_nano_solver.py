@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.nano_solver import VeritasNanoSolver, SolverStatus
+from veritas.nano_solver import SolverStatus, VeritasNanoSolver
 
 
 def test_lra_unsat_core():

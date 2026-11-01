@@ -9,10 +9,10 @@ for the organic subset so molecular weights are meaningful.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-VALENCE: Dict[str, Tuple[int, ...]] = {
+VALENCE: dict[str, tuple[int, ...]] = {
     "H": (1,),
     "B": (3,),
     "C": (4,),
@@ -27,7 +27,7 @@ VALENCE: Dict[str, Tuple[int, ...]] = {
     "I": (1,),
     "Se": (2, 4, 6),
 }
-AROMATIC_VALENCE: Dict[str, Tuple[int, ...]] = {
+AROMATIC_VALENCE: dict[str, tuple[int, ...]] = {
     "c": (3,),
     "n": (3,),
     "o": (2,),
@@ -68,23 +68,25 @@ class Atom:
 
 @dataclass
 class SmilesAnalysis:
-    atoms: List[Atom] = field(default_factory=list)
-    bonds: List[Tuple[int, int, float]] = field(default_factory=list)
+    atoms: list[Atom] = field(default_factory=list)
+    bonds: list[tuple[int, int, float]] = field(default_factory=list)
     formal_charge: int = 0
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    formula: Dict[str, int] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    formula: dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
-    def molecular_weight(self) -> Optional[float]:
+    def molecular_weight(self) -> float | None:
         if self.errors:
             return None
-        return sum(ATOMIC_WEIGHT.get(el, 0.0) * count for el, count in self.formula.items())
+        if any(el not in ATOMIC_WEIGHT for el in self.formula):
+            return None
+        return sum(ATOMIC_WEIGHT[el] * count for el, count in self.formula.items())
 
-    def as_dict(self) -> Dict[str, object]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
             "atoms": len(self.atoms),
@@ -96,8 +98,8 @@ class SmilesAnalysis:
         }
 
 
-def _tokenize(smiles: str) -> List[str]:
-    tokens: List[str] = []
+def _tokenize(smiles: str) -> list[str]:
+    tokens: list[str] = []
     i = 0
     while i < len(smiles):
         ch = smiles[i]
@@ -180,11 +182,11 @@ def analyze_smiles(smiles: str) -> SmilesAnalysis:
         analysis.errors.append(str(exc))
         return analysis
 
-    atoms: List[Atom] = analysis.atoms
-    current: Optional[int] = None
-    pending_bond: Optional[float] = None
-    branch_stack: List[Optional[int]] = []
-    rings: Dict[str, Tuple[int, float]] = {}
+    atoms: list[Atom] = analysis.atoms
+    current: int | None = None
+    pending_bond: float | None = None
+    branch_stack: list[int | None] = []
+    rings: dict[str, tuple[int, float]] = {}
 
     for token in tokens:
         if token == "(":
@@ -259,7 +261,7 @@ def _add_bond(analysis: SmilesAnalysis, i: int, j: int, order: float) -> None:
         analysis.atoms[j].bond_sum += float(order)
 
 
-def _allowed(atom: Atom) -> Tuple[int, ...]:
+def _allowed(atom: Atom) -> tuple[int, ...]:
     symbol = atom.symbol
     if atom.aromatic:
         base = AROMATIC_VALENCE.get(symbol)
@@ -306,7 +308,7 @@ def _finish_atom(analysis: SmilesAnalysis, atom: Atom) -> None:
 
 
 def _formula(analysis: SmilesAnalysis) -> None:
-    formula: Dict[str, int] = {}
+    formula: dict[str, int] = {}
     for atom in analysis.atoms:
         element = atom.element
         formula[element] = formula.get(element, 0) + 1
@@ -335,7 +337,7 @@ def formal_charge_neutral(charges: Sequence[int]) -> bool:
     return sum(int(charge) for charge in charges) == 0
 
 
-def molecular_weight(smiles: str) -> Optional[float]:
+def molecular_weight(smiles: str) -> float | None:
     return analyze_smiles(smiles).molecular_weight()
 
 

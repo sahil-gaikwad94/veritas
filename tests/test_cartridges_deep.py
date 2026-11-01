@@ -4,13 +4,13 @@ import math
 
 import pytest
 
-from veritas.cartridges.code_synth import verify_python_source
 from veritas.cartridges.chem import (
     analyze_smiles,
     formal_charge_neutral,
     molecular_weight,
     smiles_valence_ok,
 )
+from veritas.cartridges.code_synth import verify_python_source
 from veritas.cartridges.or_sched import SchedulingError, SchedulingProblem
 from veritas.cartridges.phys import (
     ACCELERATION,

@@ -1,14 +1,21 @@
-"""Phase 3: Pure-Python VeritasNano solver (QF_LRA + QF_IDL) with push/pop and UnsatCore."""
+"""Exact-rational linear/difference feasibility with bounded Fourier–Motzkin.
 
+This is a reference decision procedure, not the dual-simplex engine in the roadmap.
+All constraints are checked in one theory. Unsupported assertions raise; resource
+exhaustion returns UNKNOWN. SAT includes a rational witness; UNSAT cores use correct
+deletion minimization and are labelled non-minimal if the budget expires.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple
+import math
 import time
+from dataclasses import dataclass
+from enum import StrEnum
+from fractions import Fraction
+from typing import Any
 
 
-class SolverStatus(str, Enum):
+class SolverStatus(StrEnum):
     SAT = "SAT"
     UNSAT = "UNSAT"
     UNKNOWN = "UNKNOWN"
@@ -17,362 +24,263 @@ class SolverStatus(str, Enum):
 @dataclass
 class _Constraint:
     tracker: Any
-    kind: str  # 'lra' or 'diff' or 'bound'
-    data: Any
+    coeffs: dict[Any, Fraction]
+    rhs: Fraction
+    strict: bool = False
+
+
+@dataclass
+class _Row:
+    coeffs: dict[Any, Fraction]
+    rhs: Fraction
+    strict: bool
+    sources: frozenset
 
 
 class VeritasNanoSolver:
-    def __init__(self):
-        self.constraints: List[_Constraint] = []
-        self.stack: List[int] = []
-        self._last_core: List[Any] = []
-        self.variables: Set[Any] = set()
+    def __init__(self, *, max_rows=10_000, max_variables=24, timeout_ms=1000):
+        self.constraints: list[_Constraint] = []
+        self.stack: list[int] = []
+        self.variables = set()
+        self.max_rows = int(max_rows)
+        self.max_variables = int(max_variables)
+        self.timeout_ms = timeout_ms
+        self._last_core = []
+        self._last_model = {}
+        self._last_status = None
+        self.core_is_minimal = False
+        self.unknown_reason = ""
 
-    # ---- push/pop ----
-    def push(self) -> None:
+    def push(self):
         self.stack.append(len(self.constraints))
+        self._invalidate()
 
-    def pop(self) -> None:
-        if not self.stack:
-            return
-        n = self.stack.pop()
-        self.constraints = self.constraints[:n]
+    def pop(self, levels=1):
+        if levels < 1 or levels > len(self.stack):
+            raise IndexError("invalid solver pop depth")
+        for _ in range(levels):
+            self.constraints = self.constraints[:self.stack.pop()]
+        self.variables = {v for c in self.constraints for v in c.coeffs}
+        self._invalidate()
 
-    # ---- assertions ----
-    def assert_constraint(self, constraint: Any, tracker_id: Any = None) -> None:
+    def _invalidate(self):
+        self._last_core, self._last_model, self._last_status = [], {}, None
+        self.core_is_minimal = False
+
+    @staticmethod
+    def _rational(value):
+        if isinstance(value, bool):
+            raise ValueError("boolean is not a rational coefficient")
+        if isinstance(value, Fraction):
+            return value
+        if isinstance(value, int):
+            return Fraction(value)
+        if isinstance(value, float) and math.isfinite(value):
+            return Fraction(str(value))
+        raise ValueError(f"non-finite/non-numeric rational {value!r}")
+
+    def _coeffs(self, values):
+        if not isinstance(values, dict):
+            values = dict(values)
+        out = {}
+        for key, value in values.items():
+            hash(key)
+            number = self._rational(value)
+            if number:
+                out[key] = out.get(key, Fraction(0)) + number
+        return {k: v for k, v in out.items() if v}
+
+    def assert_constraint(self, constraint, tracker_id=None):
         self.assert_and_track(constraint, tracker_id)
 
-    def assert_and_track(self, constraint: Any, tracker_id: Any = None) -> None:
-        norm = self._normalize(constraint)
+    def assert_and_track(self, constraint, tracker_id=None):
         if tracker_id is None:
             tracker_id = len(self.constraints)
-        self.constraints.append(_Constraint(tracker=tracker_id, kind=norm["kind"], data=norm["data"]))
-        for v in norm.get("vars", []):
-            self.variables.add(v)
+        hash(tracker_id)
+        if isinstance(constraint, dict):
+            kind = constraint.get("type", constraint.get("kind", "linear"))
+            if kind in ("bound", "bounds"):
+                constraint = ("bound", constraint["var"], constraint.get("lo"), constraint.get("hi"))
+            elif kind == "diff":
+                constraint = ("diff", constraint["i"], constraint["j"], constraint.get("c", 0))
+            else:
+                constraint = (constraint.get("op", "le"), constraint.get("coeffs", {}), constraint.get("rhs", 0))
+        if not isinstance(constraint, (tuple, list)) or not constraint:
+            raise ValueError(f"unsupported solver constraint {constraint!r}")
+        op = constraint[0]
+        if op in ("diff", "difference") and len(constraint) == 4:
+            i, j, rhs = constraint[1], constraint[2], self._rational(constraint[3])
+            hash(i)
+            hash(j)
+            coeffs = {i: Fraction(1), j: Fraction(-1)}
+            coeffs = {k: v for k, v in coeffs.items() if v}
+            strict = False
+        elif op in ("bound", "bounds") and len(constraint) == 4:
+            var, lo, hi = constraint[1:]
+            hash(var)
+            if lo is not None:
+                self.assert_and_track(("ge", {var: 1}, lo), (tracker_id, "lo"))
+            if hi is not None:
+                self.assert_and_track(("le", {var: 1}, hi), (tracker_id, "hi"))
+            return
+        elif op in ("le", "lt", "ge", "gt", "eq") and len(constraint) == 3:
+            coeffs, rhs = self._coeffs(constraint[1]), self._rational(constraint[2])
+            if op in ("ge", "gt"):
+                coeffs = {k: -v for k, v in coeffs.items()}
+                rhs = -rhs
+                op = "lt" if op == "gt" else "le"
+            strict = op == "lt"
+        else:
+            raise ValueError(f"unsupported solver constraint {constraint!r}")
+        self.constraints.append(_Constraint(tracker_id, coeffs, rhs, strict))
+        self.variables.update(coeffs)
+        self._invalidate()
 
-    # ---- check ----
-    def check(self) -> SolverStatus:
-        return self.check_with_timeout(None)
+    def check(self):
+        return self.check_with_timeout(self.timeout_ms)
 
-    def check_with_timeout(self, timeout_ms: Optional[int] = None) -> SolverStatus:
+    def check_with_timeout(self, timeout_ms=None):
         started = time.monotonic()
-        deadline = None if timeout_ms is None else started + max(0, timeout_ms) / 1000.0
-        # Difference logic
-        diff_cons = [c for c in self.constraints if c.kind == "diff"]
-        if diff_cons:
-            status, core = self._check_diff(diff_cons)
-            if status == SolverStatus.UNSAT:
-                self._last_core = core
-                return status
-            if status == SolverStatus.UNKNOWN:
-                self._last_core = []
-                return status
-        # LRA
-        lra_cons = [c for c in self.constraints if c.kind in ("lra", "bound")]
-        if lra_cons:
-            status, core = self._check_lra(lra_cons, deadline=deadline)
-            if status != SolverStatus.SAT:
-                self._last_core = core if status == SolverStatus.UNSAT else []
-                return status
-        self._last_core = []
+        deadline = None if timeout_ms is None else started + max(0, timeout_ms) / 1000
+        self._invalidate()
+        rows = [self._normalize(c.coeffs, c.rhs, c.strict, frozenset({i})) for i, c in enumerate(self.constraints)]
+        if len(self.variables) > self.max_variables:
+            return self._unknown("variable budget exhausted")
+        result = self._eliminate(rows, sorted(self.variables, key=repr), deadline)
+        if result is None:
+            return self._unknown("time or row budget exhausted")
+        feasible, final_rows, stages = result
+        if not feasible:
+            indices = set().union(*(r.sources for r in final_rows if self._contradiction(r)))
+            self._deletion_core(set(indices), deadline)
+            self._last_status = SolverStatus.UNSAT
+            return SolverStatus.UNSAT
+        model = self._witness(stages)
+        if model is None:
+            return self._unknown("strict-bound witness reconstruction exhausted")
+        self._last_model = model
+        self._last_status = SolverStatus.SAT
         return SolverStatus.SAT
 
-    def get_unsat_core(self) -> List[Any]:
-        return list(self._last_core)
+    def _unknown(self, reason):
+        self.unknown_reason = reason
+        self._last_status = SolverStatus.UNKNOWN
+        return SolverStatus.UNKNOWN
 
-    # ---- normalization ----
-    def _normalize(self, constraint: Any) -> Dict[str, Any]:
-        # tuple/list
-        if isinstance(constraint, (tuple, list)):
-            if not constraint:
-                return {"kind": "lra", "data": {"type": "true"}, "vars": []}
-            kind = constraint[0]
-            if kind in ("diff", "difference"):
-                # x_i - x_j <= c
-                i = constraint[1]
-                j = constraint[2]
-                c = float(constraint[3]) if len(constraint) > 3 else 0.0
-                self.variables.update([i, j])
-                return {"kind": "diff", "data": {"i": i, "j": j, "c": c}, "vars": [i, j]}
-            if kind in ("bound", "bounds"):
-                v = constraint[1]
-                lo = constraint[2] if len(constraint) > 2 else None
-                hi = constraint[3] if len(constraint) > 3 else None
-                self.variables.add(v)
-                return {"kind": "bound", "data": {"var": v, "lo": lo, "hi": hi}, "vars": [v]}
-            if kind in ("le", "ge", "eq", "lt", "gt"):
-                coeffs = constraint[1]
-                rhs = float(constraint[2]) if len(constraint) > 2 else 0.0
-                coeffs = self._coeffs_to_dict(coeffs)
-                vars_ = list(coeffs.keys())
-                self.variables.update(vars_)
-                return {"kind": "lra", "data": {"op": kind, "coeffs": coeffs, "rhs": rhs}, "vars": vars_}
-            if kind in ("linear", "affine"):
-                coeffs = constraint[1]
-                rhs = float(constraint[2]) if len(constraint) > 2 else 0.0
-                op = constraint[3] if len(constraint) > 3 else "le"
-                coeffs = self._coeffs_to_dict(coeffs)
-                vars_ = list(coeffs.keys())
-                self.variables.update(vars_)
-                return {"kind": "lra", "data": {"op": op, "coeffs": coeffs, "rhs": rhs}, "vars": vars_}
-            # generic: try as coeffs dict
-            if isinstance(constraint[1], dict):
-                coeffs = self._coeffs_to_dict(constraint[1])
-                rhs = float(constraint[2]) if len(constraint) > 2 else 0.0
-                op = constraint[3] if len(constraint) > 3 else "le"
-                vars_ = list(coeffs.keys())
-                self.variables.update(vars_)
-                return {"kind": "lra", "data": {"op": op, "coeffs": coeffs, "rhs": rhs}, "vars": vars_}
-        # dict
-        if isinstance(constraint, dict):
-            if "type" in constraint and constraint["type"] == "diff":
-                i = constraint["i"]; j = constraint["j"]; c = float(constraint.get("c", 0.0))
-                self.variables.update([i, j])
-                return {"kind": "diff", "data": {"i": i, "j": j, "c": c}, "vars": [i, j]}
-            if constraint.get("type") in ("bound",):
-                v = constraint["var"]
-                self.variables.add(v)
-                return {"kind": "bound", "data": {"var": v, "lo": constraint.get("lo"), "hi": constraint.get("hi")}, "vars": [v]}
-            coeffs = constraint.get("coeffs", {})
-            coeffs = self._coeffs_to_dict(coeffs)
-            op = constraint.get("op", constraint.get("kind", "le"))
-            rhs = float(constraint.get("rhs", constraint.get("target", 0.0)))
-            vars_ = list(coeffs.keys())
-            self.variables.update(vars_)
-            return {"kind": "lra", "data": {"op": op, "coeffs": coeffs, "rhs": rhs}, "vars": vars_}
-        # VirExpr
-        try:
-            from .compiler.vir import VirExpr
-            if isinstance(constraint, VirExpr) and constraint.kind == "compare":
-                # var vs const
-                lhs = constraint.lhs
-                rhs = constraint.rhs
-                if getattr(lhs, "kind", None) == "var" and getattr(rhs, "kind", None) in ("const_real", "const_int", "const_value"):
-                    v = lhs.var_id if lhs.var_id is not None else lhs.name
-                    val = float(rhs.value)
-                    op = constraint.op
-                    # convert to bound/lra
-                    if op in ("eq",):
-                        coeffs = {v: 1.0}
-                        return {"kind": "lra", "data": {"op": "eq", "coeffs": coeffs, "rhs": val}, "vars": [v]}
-                    if op in ("le", "lt"):
-                        coeffs = {v: 1.0}
-                        return {"kind": "lra", "data": {"op": "le", "coeffs": coeffs, "rhs": val}, "vars": [v]}
-                    if op in ("ge", "gt"):
-                        coeffs = {v: 1.0}
-                        return {"kind": "lra", "data": {"op": "ge", "coeffs": coeffs, "rhs": val}, "vars": [v]}
-        except Exception:
-            pass
-        # fallback: treat as true
-        return {"kind": "lra", "data": {"type": "true", "coeffs": {}, "rhs": 0.0, "op": "le"}, "vars": []}
+    @staticmethod
+    def _normalize(coeffs, rhs, strict, sources):
+        coeffs = {k: v for k, v in coeffs.items() if v}
+        if coeffs:
+            first = sorted(coeffs, key=repr)[0]
+            scale = abs(coeffs[first])
+            coeffs = {k: v / scale for k, v in coeffs.items()}
+            rhs /= scale
+        return _Row(coeffs, rhs, strict and bool(coeffs), sources)
 
-    def _coeffs_to_dict(self, coeffs: Any) -> Dict[Any, float]:
-        if isinstance(coeffs, dict):
-            return {k: float(v) for k, v in coeffs.items()}
-        # list of (var, coeff)
-        if isinstance(coeffs, (list, tuple)):
-            out = {}
-            for item in coeffs:
-                if isinstance(item, (tuple, list)) and len(item) >= 2:
-                    out[item[0]] = float(item[1])
-                else:
-                    # maybe var names
-                    pass
-            if out:
-                return out
-        return {}
+    @staticmethod
+    def _contradiction(row):
+        return not row.coeffs and (row.rhs < 0 or (row.strict and row.rhs == 0))
 
-    # ---- diff check ----
-    def _check_diff(self, cons: List[_Constraint]) -> Tuple[SolverStatus, List[Any]]:
-        edges = []
-        nodes = set()
-        for c in cons:
-            d = c.data
-            i = d["i"]; j = d["j"]; w = d["c"]
-            nodes.add(i); nodes.add(j)
-            # constraint x_i - x_j <= w  => edge j->i weight w
-            edges.append((j, i, w, c.tracker))
-        # Bellman-Ford
-        dist = {n: 0.0 for n in nodes}
-        pred = {n: None for n in nodes}
-        n = len(nodes)
-        for _ in range(n):
-            updated = False
-            for (u, v, w, tr) in edges:
-                if dist[u] + w < dist[v] - 1e-12:
-                    dist[v] = dist[u] + w
-                    pred[v] = (u, v, w, tr)
-                    updated = True
-            if not updated:
-                break
-        # check negative cycle
-        for (u, v, w, tr) in edges:
-            if dist[u] + w < dist[v] - 1e-12:
-                # find a node in the cycle
-                x = v
-                for _ in range(len(nodes)):
-                    p = pred.get(x)
-                    if p is None:
-                        break
-                    x = p[0]
-                # collect cycle nodes
-                cycle_nodes = set()
-                cur = x
-                for _ in range(len(nodes) + 1):
-                    cycle_nodes.add(cur)
-                    p = pred.get(cur)
-                    if p is None:
-                        break
-                    nxt = p[0]
-                    if nxt == x:
-                        break
-                    cur = nxt
-                core = [trk for (uu, vv, ww, trk) in edges if uu in cycle_nodes and vv in cycle_nodes]
-                if not core:
-                    core = [c.tracker for c in cons]
-                return SolverStatus.UNSAT, core
-        return SolverStatus.SAT, []
-
-    # ---- lra check ----
-    def _check_lra(
-        self, cons: List[_Constraint], deadline: Optional[float] = None
-    ) -> Tuple[SolverStatus, List[Any]]:
-        # Build list of inequalities (coeffs dict, rhs) meaning sum coeff*var <= rhs
-        ineqs: List[Tuple[Dict[Any, float], float]] = []
-        for c in cons:
-            d = c.data
-            if c.kind == "bound":
-                v = d["var"]
-                lo = d.get("lo")
-                hi = d.get("hi")
-                if hi is not None:
-                    ineqs.append(({v: 1.0}, float(hi)))
-                if lo is not None:
-                    ineqs.append(({v: -1.0}, -float(lo)))
-                continue
-            op = d.get("op", "le")
-            coeffs = dict(d.get("coeffs", {}))
-            rhs = float(d.get("rhs", 0.0))
-            if op in ("le", "lt"):
-                ineqs.append((coeffs, rhs))
-            elif op in ("ge", "gt"):
-                ineqs.append(({k: -val for k, val in coeffs.items()}, -rhs))
-            elif op in ("eq",):
-                ineqs.append((dict(coeffs), rhs))
-                ineqs.append(({k: -val for k, val in coeffs.items()}, -rhs))
-            else:
-                ineqs.append((coeffs, rhs))
-        variables = set()
-        for constraint in cons:
-            data = constraint.data
-            if constraint.kind == "bound":
-                variables.add(data["var"])
-            else:
-                variables.update((data.get("coeffs") or {}).keys())
-        # Deterministic variable order keeps cores reproducible across runs.
-        variables = set(sorted(variables, key=repr))
-        feasible = self._fourier_motzkin(ineqs, variables, deadline=deadline)
-        if feasible is None:
-            return SolverStatus.UNKNOWN, []
-        if feasible:
-            return SolverStatus.SAT, []
-        # deletion-based core
-        core = self._deletion_core(cons, ineqs, variables, deadline=deadline)
-        return SolverStatus.UNSAT, core
-
-    def _fourier_motzkin(
-        self,
-        ineqs: List[Tuple[Dict[Any, float], float]],
-        variables: Set[Any],
-        *,
-        deadline: Optional[float] = None,
-    ) -> Optional[bool]:
-        """Exact linear feasibility by Fourier–Motzkin elimination.
-
-        Returns ``True``/``False`` or ``None`` when the budget is exhausted; ``None`` must
-        be treated as *unknown*, never as satisfiable.
-        """
-
-        ineqs = [(dict(c), float(r)) for c, r in ineqs]
-        vars_list = sorted(variables, key=repr)
-        tol = 1e-9
-        for v in vars_list:
-            if deadline is not None and time.monotonic() > deadline:
+    def _eliminate(self, rows, variables, deadline):
+        rows = list(rows)
+        stages = []
+        for var in variables:
+            if deadline is not None and time.monotonic() >= deadline:
                 return None
-            pos = [ineq for ineq in ineqs if ineq[0].get(v, 0.0) > tol]
-            neg = [ineq for ineq in ineqs if ineq[0].get(v, 0.0) < -tol]
-            zero = [ineq for ineq in ineqs if abs(ineq[0].get(v, 0.0)) <= tol]
-            if not pos or not neg:
-                ineqs = zero + [i for i in ineqs if i not in zero and i not in pos and i not in neg] + pos + neg
-                # drop v from all (not necessary)
-                continue
-            if len(pos) * len(neg) + len(zero) > 50_000:
+            pos = [r for r in rows if r.coeffs.get(var, 0) > 0]
+            neg = [r for r in rows if r.coeffs.get(var, 0) < 0]
+            zero = [r for r in rows if var not in r.coeffs]
+            if any(self._contradiction(r) for r in zero):
+                return False, zero, stages
+            stages.append((var, rows))
+            if len(pos) * len(neg) + len(zero) > self.max_rows:
                 return None
-            new_ineqs = list(zero)
+            combined = []
             for p in pos:
                 for n in neg:
-                    a_p = p[0][v]
-                    a_n = n[0][v]
-                    coeffs: Dict[Any, float] = {}
-                    for y in vars_list:
-                        if y == v:
-                            continue
-                        aval = p[0].get(y, 0.0)
-                        cval = n[0].get(y, 0.0)
-                        coeffs[y] = a_p * cval - a_n * aval
-                    rhs = a_p * n[1] - a_n * p[1]
-                    new_ineqs.append((coeffs, rhs))
-            ineqs = new_ineqs
-        # check contradictions
-        for coeffs, rhs in ineqs:
-            if all(abs(coeffs.get(v, 0.0)) <= 1e-9 for v in vars_list):
-                if rhs < -1e-7:
-                    return False
-        return True
+                    a, b = p.coeffs[var], -n.coeffs[var]
+                    coeffs = {k: a * n.coeffs.get(k, 0) + b * p.coeffs.get(k, 0)
+                              for k in p.coeffs.keys() | n.coeffs.keys() if k != var}
+                    combined.append(self._normalize(coeffs, a * n.rhs + b * p.rhs,
+                                                    p.strict or n.strict, p.sources | n.sources))
+            unique = {}
+            for row in zero + combined:
+                key = (tuple(sorted(((repr(k), k, v) for k, v in row.coeffs.items()))), row.rhs, row.strict)
+                if key in unique:
+                    old = unique[key]
+                    row = _Row(row.coeffs, row.rhs, row.strict, old.sources | row.sources)
+                unique[key] = row
+            rows = list(unique.values())
+        bad = [r for r in rows if self._contradiction(r)]
+        return (not bad), rows, stages
 
-    def _deletion_core(
-        self, cons: List[_Constraint], ineqs, variables, *, deadline: Optional[float] = None
-    ) -> List[Any]:
-        # try remove one constraint at a time
-        core: List[Any] = []
-        for i, c in enumerate(cons):
-            subset = [x for j, x in enumerate(cons) if j != i]
-            # rebuild ineqs for subset
-            sub_ineqs = []
-            for cc in subset:
-                d = cc.data
-                if cc.kind == "bound":
-                    v = d["var"]
-                    if d.get("hi") is not None:
-                        sub_ineqs.append(({v: 1.0}, float(d["hi"])))
-                    if d.get("lo") is not None:
-                        sub_ineqs.append(({v: -1.0}, -float(d["lo"])))
+    def _witness(self, stages):
+        model = {}
+        for var, rows in reversed(stages):
+            lo = hi = None
+            lo_strict = hi_strict = False
+            for row in rows:
+                coeff = row.coeffs.get(var)
+                if not coeff:
                     continue
-                op = d.get("op", "le")
-                coeffs = dict(d.get("coeffs", {}))
-                rhs = float(d.get("rhs", 0.0))
-                if op in ("le", "lt"):
-                    sub_ineqs.append((coeffs, rhs))
-                elif op in ("ge", "gt"):
-                    sub_ineqs.append(({k: -val for k, val in coeffs.items()}, -rhs))
-                elif op in ("eq",):
-                    sub_ineqs.append((dict(coeffs), rhs))
-                    sub_ineqs.append(({k: -val for k, val in coeffs.items()}, -rhs))
+                tail = sum((c * model.get(k, Fraction(0)) for k, c in row.coeffs.items() if k != var), Fraction(0))
+                bound = (row.rhs - tail) / coeff
+                if coeff > 0:
+                    if hi is None or bound < hi or (bound == hi and row.strict):
+                        hi, hi_strict = bound, row.strict
                 else:
-                    sub_ineqs.append((coeffs, rhs))
-            if deadline is not None and time.monotonic() > deadline:
-                return [c.tracker for c in cons]
-            result = self._fourier_motzkin(sub_ineqs, variables, deadline=deadline)
-            if result is True or result is None:
-                core.append(c.tracker)
-        if not core:
-            core = [c.tracker for c in cons]
-        return core
+                    if lo is None or bound > lo or (bound == lo and row.strict):
+                        lo, lo_strict = bound, row.strict
+            if lo is not None and hi is not None and (lo > hi or (lo == hi and (lo_strict or hi_strict))):
+                return None
+            if lo is not None and hi is not None:
+                value = (lo + hi) / 2
+            elif lo is not None:
+                value = lo + 1 if lo_strict else lo
+            elif hi is not None:
+                value = hi - 1 if hi_strict else hi
+            else:
+                value = Fraction(0)
+            model[var] = value
+        return model
+
+    def _deletion_core(self, indices, deadline):
+        all_indices = set(range(len(self.constraints)))
+        def unsat(subset):
+            rows = [self._normalize(c.coeffs, c.rhs, c.strict, frozenset({i})) for i, c in enumerate(self.constraints) if i in subset]
+            result = self._eliminate(rows, sorted(self.variables, key=repr), deadline)
+            return None if result is None else not result[0]
+        core = set(indices) or all_indices
+        # Verify the seed; provenance can be broader than a conflict, never narrower.
+        if unsat(core) is not True:
+            core = all_indices
+        for index in sorted(core.copy(), key=lambda i: repr(self.constraints[i].tracker)):
+            if deadline is not None and time.monotonic() >= deadline:
+                self.core_is_minimal = False
+                break
+            candidate = core - {index}
+            result = unsat(candidate)
+            if result is True:
+                core = candidate
+            elif result is None:
+                self.core_is_minimal = False
+                break
+        else:
+            self.core_is_minimal = True
+        self._last_core = list(dict.fromkeys(self.constraints[i].tracker for i in sorted(core)))
+        return self._last_core
+
+    def get_unsat_core(self):
+        return list(self._last_core) if self._last_status == SolverStatus.UNSAT else []
+
+    def get_model(self):
+        return dict(self._last_model) if self._last_status == SolverStatus.SAT else {}
+
+    def get_float_model(self):
+        return {k: float(v) for k, v in self.get_model().items()}
 
 
-# Aliases
 NanoSolver = VeritasNanoSolver
 SimplexSolver = VeritasNanoSolver
 DifferenceLogicSolver = VeritasNanoSolver
 Tier2Oracle = VeritasNanoSolver
-Z3SmtOracle = None

@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import ast
 import builtins
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any
 
 
 @dataclass
@@ -21,26 +22,26 @@ class CodeIssue:
     line: int = 0
     column: int = 0
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "message": self.message, "line": self.line, "column": self.column}
 
 
 @dataclass
 class CodeReport:
-    errors: List[CodeIssue] = field(default_factory=list)
-    warnings: List[CodeIssue] = field(default_factory=list)
+    errors: list[CodeIssue] = field(default_factory=list)
+    warnings: list[CodeIssue] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
-    def add_error(self, kind: str, message: str, node: Optional[ast.AST] = None) -> None:
+    def add_error(self, kind: str, message: str, node: ast.AST | None = None) -> None:
         self.errors.append(CodeIssue(kind, message, getattr(node, "lineno", 0), getattr(node, "col_offset", 0)))
 
-    def add_warning(self, kind: str, message: str, node: Optional[ast.AST] = None) -> None:
+    def add_warning(self, kind: str, message: str, node: ast.AST | None = None) -> None:
         self.warnings.append(CodeIssue(kind, message, getattr(node, "lineno", 0), getattr(node, "col_offset", 0)))
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
             "errors": [issue.as_dict() for issue in self.errors],
@@ -50,7 +51,7 @@ class CodeReport:
 
 class SymbolTable:
     def __init__(self):
-        self.scopes: List[Dict[str, Any]] = [{}]
+        self.scopes: list[dict[str, Any]] = [{}]
 
     def push(self) -> None:
         self.scopes.append({})
@@ -102,6 +103,16 @@ class _Checker(ast.NodeVisitor):
 
     def _visit_function(self, node: Any) -> None:
         self.symbols.define(node.name)
+        # Defaults, decorators and annotations are evaluated in the enclosing scope.
+        for default in list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]:
+            self.visit(default)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for arg in list(node.args.posonlyargs) + list(node.args.args) + list(node.args.kwonlyargs):
+            if arg.annotation is not None:
+                self.visit(arg.annotation)
+        if node.returns is not None:
+            self.visit(node.returns)
         self.symbols.push()
         arguments = node.args
         for arg in list(arguments.posonlyargs) + list(arguments.args) + list(arguments.kwonlyargs):
@@ -125,6 +136,12 @@ class _Checker(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.symbols.define(node.name)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
         self.symbols.push()
         for statement in node.body:
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -134,11 +151,52 @@ class _Checker(ast.NodeVisitor):
         self.symbols.pop()
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]:
+            self.visit(default)
         self.symbols.push()
-        for arg in node.args.args:
+        for arg in list(node.args.posonlyargs) + list(node.args.args) + list(node.args.kwonlyargs):
             self.symbols.define(arg.arg)
+        if node.args.vararg:
+            self.symbols.define(node.args.vararg.arg)
+        if node.args.kwarg:
+            self.symbols.define(node.args.kwarg.arg)
         self.visit(node.body)
         self.symbols.pop()
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._define_target(node.target)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        for case in node.cases:
+            self.symbols.push()
+            for name in self._pattern_names(case.pattern):
+                self.symbols.define(name)
+            if case.guard is not None:
+                self.visit(case.guard)
+            for statement in case.body:
+                self.visit(statement)
+            self.symbols.pop()
+
+    def _pattern_names(self, pattern: ast.AST) -> list[str]:
+        names = []
+        for node in ast.walk(pattern):
+            if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                names.append(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                names.append(node.rest)
+        return names
+
+    def visit_Global(self, node: ast.Global) -> None:
+        for name in node.names:
+            self.symbols.define(name)
+        self.report.add_warning("global_binding", "global bindings are not fully scope-checked", node)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        for name in node.names:
+            self.symbols.define(name)
+        self.report.add_warning("nonlocal_binding", "nonlocal bindings are not fully scope-checked", node)
 
     # -- names / assignments --------------------------------------------
     def visit_Name(self, node: ast.Name) -> None:

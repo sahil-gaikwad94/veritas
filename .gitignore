@@ -5,3 +5,8 @@ __pycache__/
 .venv/
 .pytest_cache/
 traces/
+
+build/
+dist/
+*.egg-info/
+wheelhouse/

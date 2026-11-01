@@ -5,12 +5,12 @@ from __future__ import annotations
 import builtins
 import functools
 import inspect
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 from .compiler.ast_transpiler import AstTranspiler
-from .compiler.dependency_graph import DependencyGraph, CircularDerivationError
-from .compiler.schema_lowering import lower_pydantic_model
-from .compiler.preflight import run_preflight, InfeasibleSpecError
+from .compiler.dependency_graph import CircularDerivationError, DependencyGraph
+from .compiler.preflight import InfeasibleSpecError, run_preflight
 from .compiler.vir import VirSpec
 
 
@@ -26,6 +26,8 @@ class VerifiedSchema:
             "preflight_check": True,
         }
         self.config.update(config)
+        self._validate_config()
+        functools.update_wrapper(self, func)
         self.name = getattr(func, "__name__", "verified_schema")
         self.model = self._resolve_model(func)
         self.transpiler = AstTranspiler(func, self.model, self.config)
@@ -37,7 +39,7 @@ class VerifiedSchema:
         self.preflight = None
         if self.config.get("preflight_check", True):
             self.preflight = run_preflight(self.spec)
-            if not self.preflight.is_sat:
+            if self.preflight.status == "UNSAT":
                 raise InfeasibleSpecError(
                     f"Spec {self.name} is infeasible at pre-flight",
                     conflicts=self.preflight.conflicts,
@@ -45,6 +47,22 @@ class VerifiedSchema:
                 )
         # convenience alias
         self.preflight_result = self.preflight
+
+    def _validate_config(self):
+        choices = {
+            "solver": {"auto", "nano", "z3"},
+            "reasoning_mode": {"crane_cot", "strict"},
+            "backtrack": {"cdcl_domain_cut", "none"},
+        }
+        for key, allowed in choices.items():
+            if self.config[key] not in allowed:
+                raise ValueError(f"{key} must be one of {sorted(allowed)}")
+        count = self.config["max_backtracks"]
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("max_backtracks must be a non-negative integer")
+        for key in ("zero_dof_collapse", "preflight_check"):
+            if not isinstance(self.config[key], bool):
+                raise ValueError(f"{key} must be boolean")
 
     def _resolve_model(self, func):
         sig = inspect.signature(func)
@@ -129,11 +147,16 @@ def verified_schema(
         "zero_dof_collapse": zero_dof_collapse,
         "preflight_check": preflight_check,
     }
+    unknown = set(extra) - {"strict"}
+    if unknown:
+        raise ValueError(f"unknown schema options: {sorted(unknown)}")
     config.update(extra)
 
     def decorator(f):
         return VerifiedSchema(f, **config)
 
+    if isinstance(func, VerifiedSchema):
+        return func
     if callable(func) and not isinstance(func, type):
         return decorator(func)
     if func is not None:
@@ -223,11 +246,16 @@ def quad_form(w, cov):
                 for j in range(n):
                     total += vec[i] * matrix[i][j] * vec[j]
             return total
-        import numpy as np
-
-        arr = np.array(cov, dtype=float)
-        vec_arr = np.array(vec, dtype=float)
-        return float(vec_arr @ arr @ vec_arr)
+        # Matrix inputs use the same dependency-free reference path as mappings.
+        matrix = [[float(value) for value in row] for row in cov]
+        vector = [float(value) for value in vec]
+        n = len(vector)
+        if len(matrix) != n or any(len(row) != n for row in matrix):
+            return None
+        return float(builtins.sum(
+            vector[i] * matrix[i][j] * vector[j]
+            for i in range(n) for j in range(n)
+        ))
     except Exception:
         return None
 
@@ -250,6 +278,12 @@ def keys_subset(d, allowed):
     except Exception:
         return None
 
+
+# Identity markers let the compiler distinguish the DSL from similarly named methods.
+for _name, _fn in list(globals().items()):
+    if _name in {"require", "derive", "prefer", "forall", "dot", "quad_form", "sqrt", "keys_subset"}:
+        _fn._veritas_dsl = _name
+veritas_sum._veritas_dsl = "sum"
 
 # Expose `sum` under the documented ``vt.sum`` name.
 sum = veritas_sum

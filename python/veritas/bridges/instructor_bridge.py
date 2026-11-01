@@ -8,9 +8,8 @@ passing through — the caller can still inspect ``error.report``.
 
 from __future__ import annotations
 
-import json
-from types import SimpleNamespace
-from typing import Any, Dict, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
 from ..instance import verify_json
 
@@ -37,17 +36,12 @@ def _coerce_spec(candidate: Any) -> Any:
     return None
 
 
-def _spec_schema(spec: Any) -> Optional[Dict[str, Any]]:
+def _spec_schema(spec: Any) -> dict[str, Any] | None:
     if spec is None:
         return None
-    try:
-        from ..instance import build_model
-
-        model, error = build_model(spec, {})
-        if model is not None and hasattr(model, "model_json_schema"):
-            return model.model_json_schema()
-    except Exception:
-        pass
+    schema = getattr(spec, "model_schema", None)
+    if isinstance(schema, dict):
+        return schema
     schema = getattr(spec, "json_schema", None)
     if callable(schema):
         try:
@@ -57,7 +51,7 @@ def _spec_schema(spec: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _response_text(response: Any) -> Optional[str]:
+def _response_text(response: Any) -> str | None:
     if response is None:
         return None
     if isinstance(response, str):
@@ -104,7 +98,7 @@ def _report_ok(report: Any) -> bool:
 
 def _attach(response: Any, report: Any) -> None:
     try:
-        setattr(response, "veritas_report", report)
+        response.veritas_report = report
     except Exception:
         try:
             response.__dict__["veritas_report"] = report
@@ -113,7 +107,7 @@ def _attach(response: Any, report: Any) -> None:
 
 
 class _CompletionsProxy:
-    def __init__(self, parent: "VeritasOpenAIProxy"):
+    def __init__(self, parent: VeritasOpenAIProxy):
         self._parent = parent
 
     def create(self, **kwargs: Any) -> Any:
@@ -121,7 +115,7 @@ class _CompletionsProxy:
 
 
 class _ChatProxy:
-    def __init__(self, parent: "VeritasOpenAIProxy"):
+    def __init__(self, parent: VeritasOpenAIProxy):
         self.completions = _CompletionsProxy(parent)
 
 

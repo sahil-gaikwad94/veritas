@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, List, Mapping, Optional
+import math
+from collections.abc import Mapping
+from typing import Any
 
-from .compiler import vir as vir_module
 from .compiler.vir import (
     ContainerInfo,
     SoftPreference,
@@ -27,14 +28,14 @@ from .compiler.vir import (
     ZeroDofRule,
 )
 
-SERDE_VERSION = 2
+SERDE_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
 # typing helpers
 # ---------------------------------------------------------------------------
 
-def _type_to_dict(vtype: Optional[VirType]) -> Optional[Dict[str, Any]]:
+def _type_to_dict(vtype: VirType | None) -> dict[str, Any] | None:
     if vtype is None:
         return None
     return {
@@ -48,10 +49,19 @@ def _type_to_dict(vtype: Optional[VirType]) -> Optional[Dict[str, Any]]:
         "max_len": vtype.max_len,
         "val_min": vtype.val_min,
         "val_max": vtype.val_max,
+        "nullable": vtype.nullable,
+        "min_exclusive": vtype.min_exclusive,
+        "max_exclusive": vtype.max_exclusive,
+        "item_type": _type_to_dict(vtype.item_type),
+        "properties": {k: _type_to_dict(v) for k, v in vtype.properties.items()},
+        "required": list(vtype.required),
+        "additional_properties": vtype.additional_properties,
+        "model_name": vtype.model_name,
+        "container_kind": vtype.container_kind,
     }
 
 
-def _type_from_dict(payload: Optional[Mapping[str, Any]]) -> Optional[VirType]:
+def _type_from_dict(payload: Mapping[str, Any] | None) -> VirType | None:
     if not payload:
         return None
     return VirType(
@@ -65,14 +75,27 @@ def _type_from_dict(payload: Optional[Mapping[str, Any]]) -> Optional[VirType]:
         max_len=payload.get("max_len", 0),
         val_min=payload.get("val_min", float("-inf")),
         val_max=payload.get("val_max", float("inf")),
+        nullable=bool(payload.get("nullable", False)),
+        min_exclusive=bool(payload.get("min_exclusive", False)),
+        max_exclusive=bool(payload.get("max_exclusive", False)),
+        item_type=_type_from_dict(payload.get("item_type")),
+        properties={k: _type_from_dict(v) for k, v in (payload.get("properties") or {}).items()},
+        required=list(payload.get("required") or []),
+        additional_properties=payload.get("additional_properties", True),
+        model_name=payload.get("model_name"),
+        container_kind=payload.get("container_kind", "dict"),
     )
 
 
 def _encode_value(value: Any) -> Any:
     if isinstance(value, bool) or value is None or isinstance(value, str):
         return value
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
         return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return {"__float__": "inf" if value == math.inf else "-inf" if value == -math.inf else "nan"}
     if isinstance(value, list):
         return [_encode_value(v) for v in value]
     if isinstance(value, tuple):
@@ -85,24 +108,43 @@ def _encode_value(value: Any) -> Any:
         pairs = [[_encode_value(k), _encode_value(v)] for k, v in value.items()]
         pairs.sort(key=lambda kv: repr(kv[0]))
         return {"__pairs__": pairs}
-    # Last resort: keep a readable, stable representation instead of failing serialization.
-    return {"__repr__": repr(value)}
+    raise TypeError(f"cannot serialize {type(value).__name__} into VIR")
 
 
-def _decode_value(payload: Any) -> Any:
+def _decode_value(payload: Any, _depth: int = 0) -> Any:
+    if _depth > 128:
+        raise ValueError("VIR value nesting exceeds 128")
     if isinstance(payload, list):
-        return [_decode_value(v) for v in payload]
+        return [_decode_value(v, _depth + 1) for v in payload]
     if isinstance(payload, dict):
-        if "__tuple__" in payload:
-            return tuple(_decode_value(v) for v in payload["__tuple__"])
-        if "__set__" in payload:
-            return set(_decode_value(v) for v in payload["__set__"])
-        if "__pairs__" in payload:
-            return {_decode_value(k): _decode_value(v) for k, v in payload["__pairs__"]}
-        if "__repr__" in payload:
-            return payload["__repr__"]
-        # plain dict (older payloads)
-        return {k: _decode_value(v) for k, v in payload.items()}
+        tags = {"__float__", "__tuple__", "__set__", "__pairs__", "__repr__"} & payload.keys()
+        if tags:
+            if len(payload) != 1:
+                raise ValueError("tagged VIR value has unexpected sibling keys")
+            tag = next(iter(tags))
+            inner = payload[tag]
+            if tag == "__float__":
+                if inner not in ("inf", "-inf", "nan"):
+                    raise ValueError("invalid tagged float")
+                return {"inf": math.inf, "-inf": -math.inf, "nan": math.nan}[inner]
+            if tag == "__repr__":
+                raise ValueError("opaque Python objects are not portable VIR")
+            if not isinstance(inner, list):
+                raise ValueError(f"{tag} payload must be a list")
+            if tag == "__tuple__":
+                return tuple(_decode_value(v, _depth + 1) for v in inner)
+            if tag == "__set__":
+                return set(_decode_value(v, _depth + 1) for v in inner)
+            out = {}
+            for pair in inner:
+                if not isinstance(pair, list) or len(pair) != 2:
+                    raise ValueError("__pairs__ entries must be [key, value]")
+                key = _decode_value(pair[0], _depth + 1)
+                if key in out:
+                    raise ValueError("duplicate key in tagged VIR mapping")
+                out[key] = _decode_value(pair[1], _depth + 1)
+            return out
+        return {k: _decode_value(v, _depth + 1) for k, v in payload.items()}
     return payload
 
 
@@ -129,10 +171,10 @@ _EXPR_FIELDS = (
 )
 
 
-def expr_to_dict(expr: Optional[VirExpr]) -> Optional[Dict[str, Any]]:
+def expr_to_dict(expr: VirExpr | None) -> dict[str, Any] | None:
     if expr is None:
         return None
-    payload: Dict[str, Any] = {field: getattr(expr, field, None) for field in _EXPR_FIELDS}
+    payload: dict[str, Any] = {field: getattr(expr, field, None) for field in _EXPR_FIELDS}
     payload["value"] = _encode_value(expr.value)
     payload["args"] = [expr_to_dict(a) for a in expr.args]
     payload["lhs"] = expr_to_dict(expr.lhs)
@@ -142,15 +184,27 @@ def expr_to_dict(expr: Optional[VirExpr]) -> Optional[Dict[str, Any]]:
     return payload
 
 
-def expr_from_dict(payload: Optional[Mapping[str, Any]]) -> Optional[VirExpr]:
+def expr_from_dict(payload: Mapping[str, Any] | None) -> VirExpr | None:
     if payload is None:
         return None
-    kwargs: Dict[str, Any] = {field: payload.get(field) for field in _EXPR_FIELDS}
-    kwargs["tol"] = payload.get("tol", 1e-6) or 1e-6
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("kind"), str) or not payload["kind"]:
+        raise ValueError("VIR expression must be an object with a non-empty kind")
+    for key in ("args", "weights_vars", "cholesky_l"):
+        if payload.get(key) is not None and not isinstance(payload[key], list):
+            raise ValueError(f"VIR expression {key} must be a list")
+    tol = payload.get("tol", 0.0)
+    if tol is not None and (isinstance(tol, bool) or not isinstance(tol, (int, float)) or not math.isfinite(tol) or tol < 0):
+        raise ValueError("VIR expression tolerance must be finite and non-negative")
+    kwargs: dict[str, Any] = {field: payload.get(field) for field in _EXPR_FIELDS}
+    kwargs["tol"] = payload.get("tol", 0.0)
+    if kwargs["tol"] is None:
+        kwargs["tol"] = 0.0
     kwargs["weight"] = payload.get("weight", 1.0) if payload.get("weight") is not None else 1.0
     kwargs["tag"] = payload.get("tag", "") or ""
     kwargs["value"] = _decode_value(payload.get("value"))
-    kwargs["args"] = [expr_from_dict(a) for a in payload.get("args") or [] if a is not None]
+    kwargs["args"] = [expr_from_dict(a) for a in payload.get("args") or []]
+    if any(a is None for a in kwargs["args"]):
+        raise ValueError("VIR expression args may not contain null")
     kwargs["lhs"] = expr_from_dict(payload.get("lhs"))
     kwargs["rhs"] = expr_from_dict(payload.get("rhs"))
     iterable = payload.get("iterable")
@@ -162,7 +216,7 @@ def expr_from_dict(payload: Optional[Mapping[str, Any]]) -> Optional[VirExpr]:
     return VirExpr(**kwargs)
 
 
-def _rule_to_dict(rule: ZeroDofRule) -> Dict[str, Any]:
+def _rule_to_dict(rule: ZeroDofRule) -> dict[str, Any]:
     return {
         "target_var": rule.target_var,
         "target_json_key": rule.target_json_key,
@@ -183,7 +237,7 @@ def _rule_from_dict(payload: Mapping[str, Any]) -> ZeroDofRule:
     )
 
 
-def _preference_to_dict(pref: SoftPreference) -> Dict[str, Any]:
+def _preference_to_dict(pref: SoftPreference) -> dict[str, Any]:
     return {
         "id": pref.id,
         "tag": pref.tag,
@@ -201,7 +255,7 @@ def _preference_from_dict(payload: Mapping[str, Any]) -> SoftPreference:
     )
 
 
-def _container_to_dict(info: ContainerInfo) -> Dict[str, Any]:
+def _container_to_dict(info: ContainerInfo) -> dict[str, Any]:
     return {
         "var_id": info.var_id,
         "name": info.name,
@@ -212,6 +266,8 @@ def _container_to_dict(info: ContainerInfo) -> Dict[str, Any]:
         "elem_max": info.elem_max,
         "target_sum": info.target_sum,
         "sum_tol": info.sum_tol,
+        "sum_op": info.sum_op,
+        "container_kind": info.container_kind,
     }
 
 
@@ -226,6 +282,8 @@ def _container_from_dict(payload: Mapping[str, Any]) -> ContainerInfo:
         elem_max=payload.get("elem_max", float("inf")),
         target_sum=payload.get("target_sum"),
         sum_tol=payload.get("sum_tol", 1e-6),
+        sum_op=payload.get("sum_op", "eq"),
+        container_kind=payload.get("container_kind", "dict"),
     )
 
 
@@ -233,7 +291,7 @@ def _container_from_dict(payload: Mapping[str, Any]) -> ContainerInfo:
 # spec <-> dict
 # ---------------------------------------------------------------------------
 
-def spec_to_dict(spec: VirSpec, *, include_model_name: bool = True) -> Dict[str, Any]:
+def spec_to_dict(spec: VirSpec, *, include_model_name: bool = True) -> dict[str, Any]:
     model_name = None
     if include_model_name and spec.model is not None:
         model_name = getattr(spec.model, "__name__", None) or str(spec.model)
@@ -254,26 +312,108 @@ def spec_to_dict(spec: VirSpec, *, include_model_name: bool = True) -> Dict[str,
         "soft_preferences": [_preference_to_dict(p) for p in spec.soft_preferences],
         "containers": [_container_to_dict(c) for c in spec.containers.values()],
         "config": _encode_value(spec.config),
+        "model_schema": spec.model_schema,
+        "field_aliases": dict(spec.field_aliases),
+        "portable_model": spec.portable_model,
+        "compiler_diagnostics": list(spec.compiler_diagnostics),
     }
 
 
+def _require_mapping(value, label):
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def _require_list(value, label):
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    return value
+
+
+def _validate_spec_payload(payload):
+    _require_mapping(payload, "spec payload")
+    if payload.get("version") != SERDE_VERSION:
+        raise ValueError(f"unsupported VIR version {payload.get('version')!r}; expected {SERDE_VERSION}")
+    variables = _require_mapping(payload.get("variables"), "variables")
+    ids = set()
+    names = set()
+    for raw_id, info in variables.items():
+        try:
+            vid = int(raw_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid variable id {raw_id!r}") from exc
+        if vid in ids:
+            raise ValueError(f"duplicate variable id {vid}")
+        ids.add(vid)
+        info = _require_mapping(info, f"variable {vid}")
+        name = info.get("name")
+        if not isinstance(name, str) or name in names:
+            raise ValueError(f"variable {vid} has invalid/duplicate name {name!r}")
+        names.add(name)
+        if info.get("type") is not None:
+            _require_mapping(info["type"], f"variable {vid} type")
+    id_to_name = _require_mapping(payload.get("id_to_name"), "id_to_name")
+    name_to_id = _require_mapping(payload.get("name_to_id"), "name_to_id")
+    if {int(k) for k in id_to_name} != ids or set(name_to_id) != names:
+        raise ValueError("variable id/name tables are inconsistent")
+    for key, name in id_to_name.items():
+        if name_to_id.get(name) != int(key) or variables[str(int(key))]["name"] != name:
+            raise ValueError("variable id/name bijection is inconsistent")
+    order = _require_list(payload.get("field_order"), "field_order")
+    if len(set(order)) != len(order) or not set(order) <= names:
+        raise ValueError("field_order contains unknown/duplicate fields")
+    for key in ("requires", "derives", "prefers", "zero_dof_rules", "soft_preferences", "containers", "compiler_diagnostics"):
+        _require_list(payload.get(key), key)
+    for rule in payload["zero_dof_rules"]:
+        rule = _require_mapping(rule, "zero_dof_rule")
+        if rule.get("target_var") not in ids or not set(rule.get("input_vars") or []) <= ids:
+            raise ValueError("derivation rule references unknown variables")
+        if rule.get("target_json_key") not in names:
+            raise ValueError("derivation rule has unknown target field")
+        expr_from_dict(rule.get("rhs_expr"))
+    for pref in payload["soft_preferences"]:
+        pref = _require_mapping(pref, "soft_preference")
+        weight = pref.get("weight", 1.0)
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight < 0:
+            raise ValueError("preference weight must be finite and non-negative")
+        expr_from_dict(pref.get("expr"))
+    for container in payload["containers"]:
+        container = _require_mapping(container, "container")
+        if container.get("var_id") not in ids:
+            raise ValueError("container references unknown variable")
+    for key in ("requires", "derives", "prefers"):
+        for expr in payload[key]:
+            expr_from_dict(expr)
+    aliases = _require_mapping(payload.get("field_aliases"), "field_aliases")
+    if not set(aliases) <= names or any(not isinstance(v, str) for v in aliases.values()):
+        raise ValueError("field_aliases is invalid")
+    if not isinstance(payload.get("portable_model"), bool):
+        raise ValueError("portable_model must be boolean")
+    schema = payload.get("model_schema")
+    if schema is not None:
+        from jsonschema import Draft202012Validator
+        Draft202012Validator.check_schema(schema)
+    config = _decode_value(payload.get("config") or {})
+    if not isinstance(config, dict):
+        raise ValueError("config must decode to an object")
+
+
 def spec_from_dict(payload: Mapping[str, Any]) -> VirSpec:
-    def _int_key_dict(raw: Mapping[Any, Any]) -> Dict[int, Any]:
-        out: Dict[int, Any] = {}
+    _validate_spec_payload(payload)
+    def _int_key_dict(raw: Mapping[Any, Any]) -> dict[int, Any]:
+        out: dict[int, Any] = {}
         for key, value in (raw or {}).items():
-            try:
-                out[int(key)] = value
-            except (TypeError, ValueError):
-                continue
+            out[int(key)] = value
         return out
 
-    variables: Dict[int, Dict[str, Any]] = {}
+    variables: dict[int, dict[str, Any]] = {}
     for vid, info in _int_key_dict(payload.get("variables") or {}).items():
         variables[vid] = {
             "name": info.get("name"),
             "type": _type_from_dict(info.get("type")),
         }
-    containers: Dict[int, ContainerInfo] = {}
+    containers: dict[int, ContainerInfo] = {}
     for entry in payload.get("containers") or []:
         info = _container_from_dict(entry)
         containers[info.var_id] = info
@@ -290,6 +430,10 @@ def spec_from_dict(payload: Mapping[str, Any]) -> VirSpec:
         soft_preferences=[_preference_from_dict(p) for p in payload.get("soft_preferences") or []],
         containers=containers,
         config=_decode_value(payload.get("config") or {}),
+        model_schema=payload.get("model_schema"),
+        field_aliases=dict(payload.get("field_aliases") or {}),
+        portable_model=bool(payload.get("portable_model", False)),
+        compiler_diagnostics=list(payload.get("compiler_diagnostics") or []),
     )
 
 
@@ -300,7 +444,15 @@ def spec_from_dict(payload: Mapping[str, Any]) -> VirSpec:
 def canonical_json(payload: Any) -> str:
     """Stable JSON encoding used for every digest in the project."""
 
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=True, default=str)
+    def finite(value):
+        if isinstance(value, float) and not math.isfinite(value):
+            return {"__float__": "inf" if value == math.inf else "-inf" if value == -math.inf else "nan"}
+        if isinstance(value, dict):
+            return {k: finite(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [finite(v) for v in value]
+        return value
+    return json.dumps(finite(payload), sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def sha256_hex(text: str) -> str:

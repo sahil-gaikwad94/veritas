@@ -14,16 +14,15 @@ import importlib
 import importlib.util
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any
 
 from ..compiler.preflight import run_preflight
 from ..decorators import VerifiedSchema
-from ..instance import describe_spec, verify_instance
-from ..proof.certificate import ProofCertificate, verify_certificate
-from ..serde import spec_digest
+from ..instance import verify_instance
+from ..proof.certificate import verify_certificate
 from ..synth import synth_schema
-
 
 # ---------------------------------------------------------------------------
 # loading
@@ -43,7 +42,7 @@ def _load_module(target: str):
     return importlib.import_module(target)
 
 
-def load_schemas(target: str) -> List[VerifiedSchema]:
+def load_schemas(target: str) -> list[VerifiedSchema]:
     module_part, _, attribute = target.partition(":")
     module = _load_module(module_part or target)
     if attribute:
@@ -70,7 +69,7 @@ def load_schemas(target: str) -> List[VerifiedSchema]:
     return unique
 
 
-def _select(schemas: Sequence[VerifiedSchema], name: Optional[str], target: str) -> VerifiedSchema:
+def _select(schemas: Sequence[VerifiedSchema], name: str | None, target: str) -> VerifiedSchema:
     if name:
         for schema in schemas:
             if schema.name == name:
@@ -125,7 +124,7 @@ def cmd_check_spec(args: argparse.Namespace) -> int:
             print(f"  requires: {len(entry['requires'])}  derives: {len(entry['derives'])}")
             print(f"  digest:   {entry['digest']}")
             if entry["preflight"]["status"] != "SAT":
-                for hint in entry["preflight"].get("relaxation", {}).get("hints", []):
+                for hint in (entry["preflight"].get("relaxation") or {}).get("hints", []):
                     print(f"  ! {hint}")
     return 0 if ok else 1
 
@@ -216,7 +215,7 @@ def cmd_synth(args: argparse.Namespace) -> int:
 def _render_trace_html(payload: Any, *, title: str = "veritas trace") -> str:
     if isinstance(payload, list):
         trace = payload
-        telemetry: Dict[str, Any] = {}
+        telemetry: dict[str, Any] = {}
         status = "unknown"
     else:
         trace = payload.get("trace") or payload.get("steps") or []
@@ -246,18 +245,10 @@ def _render_trace_html(payload: Any, *, title: str = "veritas trace") -> str:
         percent = max(0.02, min(1.0, entropy / max_entropy))
         klass = "splice" if kind == "splice" else ("backtrack" if kind == "backtrack" else "sample")
         body_parts.append(
-            "<tr class='%s'><td>%d</td><td>%s</td><td class='tok'>%s</td>"
-            "<td><span class='bar' style='width:%.1f%%'></span></td>"
-            "<td>%.3f</td><td>%s</td></tr>"
-            % (
-                klass,
-                index,
-                html.escape(str(field)),
-                html.escape(str(text)) or "&nbsp;",
-                percent * 100.0,
-                entropy,
-                html.escape(str(note)),
-            )
+            f"<tr class='{klass}'><td>{index}</td><td>{html.escape(str(field))}</td>"
+            f"<td class='tok'>{html.escape(str(text)) or '&nbsp;'}</td>"
+            f"<td><span class='bar' style='width:{percent * 100.0:.1f}%'></span></td>"
+            f"<td>{entropy:.3f}</td><td>{html.escape(str(note))}</td></tr>"
         )
     cards = "".join(
         f"<div class='card'><div class='k'>{html.escape(str(k))}</div>"
@@ -341,7 +332,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "cmd", None):
