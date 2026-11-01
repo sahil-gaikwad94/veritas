@@ -1,0 +1,13 @@
+[package]
+name = "veritas-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "veritas_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3.workspace = true
+veritas-core = { path = "../veritas-core" }
