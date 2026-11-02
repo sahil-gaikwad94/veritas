@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .hf_transformers import VeritasLogitsProcessor
 from .gbnf import generate_gbnf_from_schema
+from .hf_transformers import VeritasLogitsProcessor
 
 GBNF_JSON = r'''
 root   ::= value
