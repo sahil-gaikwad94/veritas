@@ -99,8 +99,14 @@ def _apply_element_comparison(
             return
         if op in ("le", "lt"):
             info.elem_max = min(info.elem_max, bound)
+            info.elem_max_exclusive = info.elem_max_exclusive or (
+                op == "lt" and info.elem_max == bound
+            )
         elif op in ("ge", "gt"):
             info.elem_min = max(info.elem_min, bound)
+            info.elem_min_exclusive = info.elem_min_exclusive or (
+                op == "gt" and info.elem_min == bound
+            )
         elif op == "eq":
             info.elem_min = max(info.elem_min, bound)
             info.elem_max = min(info.elem_max, bound)
@@ -112,8 +118,14 @@ def _apply_element_comparison(
         flipped = {"le": "ge", "lt": "gt", "ge": "le", "gt": "lt", "eq": "eq", "ne": "ne"}.get(op, op)
         if flipped in ("le", "lt"):
             info.elem_max = min(info.elem_max, bound)
+            info.elem_max_exclusive = info.elem_max_exclusive or (
+                flipped == "lt" and info.elem_max == bound
+            )
         elif flipped in ("ge", "gt"):
             info.elem_min = max(info.elem_min, bound)
+            info.elem_min_exclusive = info.elem_min_exclusive or (
+                flipped == "gt" and info.elem_min == bound
+            )
         elif flipped == "eq":
             info.elem_min = max(info.elem_min, bound)
             info.elem_max = min(info.elem_max, bound)

@@ -139,3 +139,49 @@ def test_preflight_detects_container_infeasibility():
     assert result.status == "UNSAT"
     assert result.conflicts
     assert result.relaxation["details"]
+
+
+# --------------------------------------------------------------------------------------
+# `veritas doctor`: the one command that answers "which engine am I running?".
+# --------------------------------------------------------------------------------------
+
+def test_doctor_reports_the_reference_engine(capsys):
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "veritas" in out and "engine" in out
+    assert "reference python" in out or "veritas_py" in out
+    assert "wire" in out
+
+
+def test_doctor_json_is_machine_readable(capsys):
+    assert main(["doctor", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert set(report) >= {"version", "python", "engine", "wire_version", "platform"}
+    assert report["python"] in ("pure", "accelerated")
+    assert report["engine"]["native_available"] is (report["python"] == "accelerated")
+    # The two fields must agree: reporting an engine without a wire version (or vice versa)
+    # would be a lie, and this is exactly what an operator pastes into a bug report.
+    assert (report["wire_version"] is None) is (report["python"] == "pure")
+
+
+def test_doctor_strict_fails_when_the_accelerator_is_missing(capsys):
+    from veritas import native
+
+    expected = 0 if native.available() else 1
+    assert main(["doctor", "--strict"]) == expected
+    if expected:
+        assert "native extension" in capsys.readouterr().err
+
+
+def test_doctor_explains_the_kill_switch(monkeypatch, capsys):
+    monkeypatch.setenv("VERITAS_NO_NATIVE", "1")
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "VERITAS_NO_NATIVE" in out
+    assert main(["doctor", "--strict"]) == 1
+
+
+def test_doctor_subcommand_is_registered(capsys):
+    assert main([]) == 0
+    help_text = capsys.readouterr().out
+    assert "doctor" in help_text

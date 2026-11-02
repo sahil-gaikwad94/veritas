@@ -32,8 +32,8 @@ A trustworthy core must precede those optimizations. In particular, a fast path 
 | P1 | Tool guards did not enforce temporal policies/budgets atomically, did not commit successful effects, and returned unnormalized output | Agent safety bypass and state corruption | Prospective policy checks, transactional commit/rollback, argument binding, validated return values, async support |
 | P1 | SQL tenant isolation was a substring check; multiple statements and unsupported syntax could pass | Security-critical false assurance | Single-statement read-only subset, identifier validation, conjunctive per-table tenant predicates, explicit unsupported errors |
 | P1 | RL exported empty preference pairs; writes were not atomic; decode conflicts lacked prompts/repairs | Poisoned training data and unreproducible exports | Complete-pair filtering, actual decode provenance, atomic JSONL/manifest writes |
-| P1 | Packaging required an unavailable Rust toolchain although the shipped engine was Python | Installation failure | Pure-Python wheel/editable install; native workspace explicitly experimental |
-| P2 | Rust modules were placeholders, including a solver returning true | Dangerous if exposed | No native acceleration claim; safe unavailable status and native roadmap |
+| P1 | Packaging required an unavailable Rust toolchain although the shipped engine was Python | Installation failure | Pure-Python wheel/editable install; the Rust extension is optional, built from source in CI and never required at import time |
+| P2 | Rust modules were placeholders, including a solver returning true | Dangerous if exposed | Placeholders deleted and every layer re-ported; gated behind `native.available()` with pure-Python fallbacks, pinned by a parity corpus and a Rust property suite (see addendum) |
 | P2 | Domain helpers had mathematical edge cases (PSD ridge, discounted expiry, missing returns, resource-search completeness, chemistry valence) | Incorrect domain results | Focused fixes and adversarial tests; conservative coverage reporting |
 
 ## Trust boundaries
@@ -82,12 +82,11 @@ pass:
 * Packaging is pure-Python setuptools with a `py.typed` marker; wheel and editable installs
   are smoke-tested. CI runs ruff, pytest, and wheel build on Python 3.11/3.12.
 
-Validation: `ruff check python tests` clean; `pytest tests/ -q` → **159 passed**; wheel
-build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
+Validation: `ruff check python tests` clean; `pytest tests/ -q` → **378 passed, 41 skipped** without the extension and **419 passed, 0 skipped** with it; wheel build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
 
 ### Remaining known limits
 
-* The Rust/Wasm/PyO3 workspace is experimental scaffolding and was not compiled here.
+* The Rust/Wasm/PyO3 workspace is no longer scaffolding: `veritas-core` is a dependency-free crate with unit and property tests, and CI compiles it, builds the `abi3` extension and the `wasm32-unknown-unknown` target. It was still not compiled in the audit sandbox (no toolchain); every native claim in this repository is backed by a CI run, not a local one.
 * Schema masking supports the documented subset only; unsupported keywords fail loudly.
 * Generic llama.cpp GBNF is JSON-only; schema-specific GBNF generation is not implemented.
 * Quadratic interval contraction is not implemented; concrete verification remains
@@ -96,6 +95,45 @@ build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0
   validators require the original trusted schema.
 
 
+## Second pass: empirical probing (2026-11-02, branch `arena/167f6e2b-veritas`)
+
+The remediation above was validated against the *claims* in the docs. This pass instead
+ran adversarial probes against the shipped engine and fixed what they exposed. Every item
+below is reproduced by a regression test in `tests/`.
+
+| Symptom found by probing | Root cause | Fix |
+|---|---|---|
+| A structural failure produced a report with **no** outcomes, so the error text was `INCOMPLETE: 0 satisfied, 0 violated, 0 unevaluated` | `verify_values` returned early on JSON-Schema errors without synthesising outcomes | Schema errors are flattened into per-field outcomes (`missing` = unevaluated, type/pattern/bounds = violated); `VerificationError` appends the concrete reasons |
+| `Field(gt=0.0)` (with `a + b == 1`) generated `a = 1`, violating the open bound | Contractor domains were closed, and the stop check compared against the outward-rounded interval rather than the declared type bound | Open bounds become the adjacent representable value (real) / neighbouring integer (int); the stop check uses declared bounds; committing an assignment that leaves an open-bounded field with no interior value is a conflict naming the *upstream* culprit |
+| `a >= 1` and `a < 1` passed preflight as `UNKNOWN` (and `gt`/`le` pairs too) | `simplify_clause` closes strict inequalities for the rational solver, so the pair looked satisfiable at the boundary | Exact 1-D bound refutation (strict-aware, integer-aware) is added to preflight; infeasibility now raises `InfeasibleSpecError` |
+| `a + b == 1` with `a = 0.023` made the contractor report a *false* dead end | HC4 linear/sum narrowing did not round outwards, so `1 - 0.977` fell one ULP outside `[0.023, 0.023]` | Outward rounding on the residual and quotient in every linear contraction, plus a ULP-slack retry when committing a point assignment; regression test pins `a=0.023 ⇒ b≈0.977` |
+| `forall(lst, lambda v: 0.2 < v < 0.4)` emitted `0.4` | Element analysis discarded strictness, and container slots had no declared-range check | `ContainerInfo` carries element exclusivity; the mask receives the analysed range as its declared range |
+| A greedy numeric literal that dead-ends (`0.4` when `v < 0.4`) failed the whole attempt | `_emit_number` was a single forward pass with no local backtracking | Bounded DFS over digits ordered by model logits, plus a deterministic interior fallback when the budget is exhausted; per-field `number_expansions` telemetry |
+| `vt.prefer` was verified but never influenced generation | No repair loop existed (the handbook documents one) | MaxSMT-style repair: violated soft bounds are intersected into the declared domain, the attempt is repeated while the weighted score improves, and the best verified result is kept (`preference_score`, `preference_repairs`) |
+| `reasoning_mode="crane_cot"` returned `reasoning=""` | The flag existed but nothing produced a scratchpad | CRANE scratchpad is produced before decoding, kept out of the JSON span, and exposed as `VerifiedResult.reasoning` (mined equations included) |
+| Token-healed splices were documented but never planned | `TokenHealer` was only used by tests | Zero-DoF/derived fields record a splice plan (`backup_tokens`, `token_ids`, `exact`, `offset`) in `result.splices` and in telemetry |
+| `domain_cuts` recorded a cut for a field that was never cut; `backtrack_fields` stayed empty | The cut path recorded whatever the last field was, and never labelled the field | Cuts are attributed from the violated clause's variables with per-field spans/entropies/conflict counts, and record the culprit in `backtrack_fields` |
+| `Field(pattern=...)` was ignored during masking | `VirType` had no `pattern` field and there was no regex engine | New `pattern.py` (Thompson NFA from `re._parser`) provides exact prefix feasibility; `pattern`/`format` now round-trip through VIR and serde |
+| `check-spec` returned `UNKNOWN` for any schema with a pattern-constrained string, even when a witness obviously existed | The witness builder filled strings with `"x" * min_len`, which cannot satisfy a pattern | Pre-flight asks the recognizer for a shortest accepted string inside the declared *and* schema-level length window, so pattern schemas now get a checked `SAT` witness |
+
+Verified state after this pass: `pytest tests/ -q` → **303 passed**; `ruff check python
+tests benchmarks` → clean; `benchmarks/decode_smoke.py` → 0 failures on the mock model.
+
+### Limits specific to this pass
+
+* The pattern subset is deliberately narrow: inline flags, backreferences, lookaround and
+  word boundaries are rejected rather than approximated. Rejected patterns degrade to
+  length-only masking with a `pattern_fallbacks` entry, and the verifier rejects a
+  mismatch. Only the first declared `pattern` per field drives the mask.
+* Numeric literals are bounded by `max_integer_digits`, `max_fraction_digits` and
+  `max_number_nodes`; a solution needing more digits than that is reported as a dead end
+  rather than rounded into (or out of) a violation.
+* The repair loop maximises the *weighted fraction* of satisfied soft preferences. It is a
+  greedy tightening loop, not an optimal MaxSMT procedure, and it stops as soon as a round
+  does not improve the score.
+* Outward rounding means contracted bounds are wide by up to a few ULPs. Decode decisions
+  use those bounds, the verifier uses exact values, and the verifier remains authoritative.
+
 ### CI dependency regression (PR #3)
 
 The first CI run exposed an unused NumPy import in the Cholesky compiler test and a
@@ -103,3 +141,28 @@ matrix-input `vt.quad_form` path that silently required NumPy. The test now chec
 pure-Python factor directly (`L Lᵀ = Σ`), matrix quadratic forms use a dependency-free
 path, and a regression forces NumPy imports to fail. The core CI environment deliberately
 installs only `dev,z3` so this contract remains tested.
+
+## Addendum: the native engine (2026-11-02)
+
+The P1/P2 packaging and placeholder findings are closed. What changed, and how it is checked:
+
+* Every layer of the reference engine has a Rust port in `crates/veritas-core`: arbitrary
+  precision rationals, outward-rounded intervals, the JSON pushdown automaton and prefix
+  classifier, the tri-state evaluator, the HC4 contractor, the exact linear solver with
+  infeasibility cores, CRANE mode selection, CDCL restart jumpback, 0-DoF splicing, token
+  healing, SMT-LIB emission and the wire framing. The crate has **no dependencies**, so a
+  native build needs no C toolchain and no third-party supply chain.
+* `crates/veritas-py` exposes those ports through `abi3-py311` PyO3 bindings and
+  `crates/veritas-wasm` through `wasm-bindgen`; CI builds both. Neither is required to
+  install or import Veritas.
+* Soundness is tested as a property, not only as examples: `crates/veritas-core/tests/soundness.rs`
+  refutes randomized constraints against a brute-force grid, re-checks every UNSAT core
+  standalone, checks the numeric prefix mask against exhaustive completion of short literals,
+  and cross-checks the automaton against the prefix classifier on random strings.
+* Parity with the Python engine is pinned by 38 hand-picked cases plus three randomized
+  differential sweeps in `tests/test_native_backend.py` (prefix verdicts, vocabulary masks,
+  numeric prefixes), so a native regression costs speed, not soundness.
+* `VERITAS_NO_NATIVE=1` disables the accelerator at runtime without reinstalling, which is
+  what makes the A/B comparison in `benchmarks/native_speedup.py` meaningful and gives an
+  operator a one-variable rollback. A Rust panic degrades to the reference path instead of
+  escaping as a `BaseException`, and `docs/NATIVE.md` records the whole contract.

@@ -756,6 +756,8 @@ class VerifiedResult(Generic[T]):
     report: VerificationReport | None = None
     raw: str = ""
     spec_name: str = ""
+    splices: list[dict[str, Any]] = field(default_factory=list)
+    mined_equations: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -767,6 +769,7 @@ class VerifiedResult(Generic[T]):
             "reasoning": self.reasoning,
             "telemetry": self.telemetry,
             "spec_name": self.spec_name,
+            "splices": self.splices,
             "ok": self.ok,
             "report": self.report.as_dict() if self.report is not None else None,
             "proof": self.proof.to_dict() if self.proof is not None else None,

@@ -28,8 +28,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import textformats
 from .cdcl_jumpback import CdclJumpbackEngine, ClauseCheckpoint
 from .compiler.vir import ContainerInfo, VirSpec, VirType
+from .crane_mode import CraneModeController
 from .evaluate import as_number, collect_var_ids
 from .instance import VerificationError, VerificationReport, _coerce_spec, verify_values
 from .interval import Hc4AffineContractor, Interval
@@ -41,9 +43,11 @@ from .json_pda import (
     render_object,
 )
 from .linear import compile_clauses, simplify_clause
+from .pattern import PatternConstraint, UnsupportedPattern
 from .proof.certificate import ProofCertificate, VerifiedResult, build_certificate
 from .rl.collector import ConflictBranchRecord, VeritasRLCollector
 from .serde import spec_digest
+from .token_healer import TokenHealer
 from .zero_dof import ZeroDofEngine
 
 _NUMBER_COMPLETE = re.compile(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$")
@@ -77,6 +81,13 @@ class DecodeConfig:
     max_string_length: int = 64
     allow_exponent: bool = False
     volume_twist_beta: float = 0.0
+    #: ``auto`` honours the schema's ``reasoning_mode``; ``strict`` never opens a
+    #: scratchpad; ``crane_cot`` forces one when the model can supply reasoning text.
+    reasoning_mode: str = "auto"
+    reasoning_max_chars: int = 8192
+    max_preference_repairs: int = 2
+    #: Node budget for the per-field backtracking search over number literals.
+    max_number_nodes: int = 512
     seed: int | None = 0
     derive_missing: bool = True
     enforce_grammar: bool = True
@@ -116,11 +127,23 @@ class DecodeTelemetry:
     masked_candidates: int = 0
     solver_checks: int = 0
     contractor_prunes: int = 0
+    string_mask_prunes: int = 0
+    format_witnesses: int = 0
+    number_expansions: int = 0
     jump_forward_fields: int = 0
     jump_forward_chars: int = 0
+    jump_forward_tokens: int = 0
+    token_heal_exact: int = 0
+    twist_adjustments: int = 0
+    reasoning_chars: int = 0
+    mined_equations: int = 0
+    preference_repairs: int = 0
+    preference_score: float | None = None
     backtracks: int = 0
     backtrack_fields: list[str] = field(default_factory=list)
     domain_cuts: list[dict[str, Any]] = field(default_factory=list)
+    pattern_fallbacks: list[str] = field(default_factory=list)
+    format_fallbacks: list[str] = field(default_factory=list)
     elapsed_ms: float = 0.0
     final_status: str = ""
     spec_digest: str = ""
@@ -143,6 +166,9 @@ class DecodeResult:
     attempts: int = 1
     model_name: str = ""
     prompt: str = ""
+    reasoning: str = ""
+    mined_equations: list[str] = field(default_factory=list)
+    splices: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -156,6 +182,7 @@ class DecodeResult:
             "telemetry": self.telemetry.as_dict(),
             "attempts": self.attempts,
             "model": self.model_name,
+            "reasoning": self.reasoning,
             "report": self.report.as_dict(),
         }
 
@@ -168,6 +195,8 @@ class VeritasSession:
         schema_or_spec: Any,
         model: Any = None,
         config: DecodeConfig | None = None,
+        *,
+        tokenizer: Any = None,
     ):
         self.spec: VirSpec = _coerce_spec(schema_or_spec)
         self.model = model
@@ -176,10 +205,15 @@ class VeritasSession:
         self.telemetry = DecodeTelemetry(spec_digest=spec_digest(self.spec))
         self.trace: list[StepTrace] = []
         self.prompt = ""
+        self.tokenizer = tokenizer
+        self.healer = TokenHealer(tokenizer) if _has_tokenizer(tokenizer) else None
+        self.splices: list[dict[str, Any]] = []
+        self.reasoning = ""
+        self.mined_equations: list[str] = []
         self.zero = ZeroDofEngine.from_spec(self.spec)
         self.cdcl = CdclJumpbackEngine()
         self.rl = VeritasRLCollector()
-        self._pending_conflicts = []
+        self._pending_conflicts: list[ConflictBranchRecord] = []
 
         names = list(self.spec.field_order)
         for name in self.spec.name_to_id:
@@ -202,6 +236,28 @@ class VeritasSession:
                 if name and name not in self._field_clause_index:
                     self._field_clause_index[name] = clause.index
 
+        # Per-field provenance: real character spans and measured entropies make CDCL
+        # culprit attribution meaningful instead of a fixed last-field fallback.
+        self._field_index: dict[str, int] = {name: index for index, name in enumerate(self.fields)}
+        self._field_span: dict[str, tuple[int, int]] = {}
+        self._field_entropy: dict[str, list[float]] = {}
+        self._field_tokens: dict[str, str] = {}
+        self._conflict_counts: dict[str, int] = {}
+        self._clause_fields: dict[int, list[str]] = {}
+        for clause in self.clauses:
+            names: list[str] = []
+            for vid in collect_var_ids(clause.expr):
+                name = self.spec.id_to_name.get(vid)
+                if name in self._field_index and name not in names:
+                    names.append(name)
+            self._clause_fields[clause.index] = names
+        self._exclusive: dict[str, tuple[bool, bool]] = {
+            name: (bool(getattr(self.types.get(name), "min_exclusive", False)),
+                   bool(getattr(self.types.get(name), "max_exclusive", False)))
+            for name in self.fields
+        }
+        self._patterns: dict[str, PatternConstraint | None] = {}
+        self._soft_overrides: dict[str, tuple[float, float]] = {}
         self.values: dict[str, Any] = {}
         self.text = ""
         self._attempt = 0
@@ -212,6 +268,7 @@ class VeritasSession:
         self._elem_overrides: dict[tuple[str, str], tuple[float, float]] = {}
         self._tabu: dict[Any, set[float]] = {}
         self._cut_direction: dict[str, int] = {}
+        self._commit_order: list[str] = []
         self.contractor = self._build_contractor()
         # Snapshot of the feasible box *before* any assignment; domain cuts are computed
         # against this, never against a committed singleton.
@@ -233,11 +290,16 @@ class VeritasSession:
             hi = getattr(vtype, "max", None)
             if kind == "bool":
                 lo, hi = 0.0, 1.0
-            contractor.add_variable(
-                self.vid[name],
-                Interval(float(lo) if lo is not None else float("-inf"),
-                         float(hi) if hi is not None else float("inf")),
-            )
+            lo = float(lo) if lo is not None else float("-inf")
+            hi = float(hi) if hi is not None else float("inf")
+            # ``gt``/``lt`` are open bounds.  The adjacent representable value is exactly
+            # the open interval over floats, so the contractor stays sound and the
+            # decoder never accepts the excluded endpoint.
+            if getattr(vtype, "min_exclusive", False) and math.isfinite(lo):
+                lo = math.nextafter(lo, math.inf)
+            if getattr(vtype, "max_exclusive", False) and math.isfinite(hi):
+                hi = math.nextafter(hi, math.inf * -1)
+            contractor.add_variable(self.vid[name], Interval(lo, hi))
         for clause in self.clauses:
             simple = simplify_clause(clause)
             if simple is None:
@@ -264,6 +326,62 @@ class VeritasSession:
             )
         self.prompt = prompt or ""
         start = time.perf_counter()
+        self._prepare_reasoning(model)
+        best = self._run_attempts(model, start)
+        if best.ok and self.config.max_preference_repairs > 0:
+            best = self._repair_preferences(model, best, start)
+        best.reasoning = self.reasoning
+        best.mined_equations = list(self.mined_equations)
+        best.splices = list(self.splices)
+        self.telemetry.preference_score = _preference_score(best.report)
+        self.telemetry.elapsed_ms = (time.perf_counter() - start) * 1000.0
+        return best
+
+    # ------------------------------------------------------------------
+    # CRANE scratchpad
+    # ------------------------------------------------------------------
+    def _reasoning_mode(self) -> str:
+        mode = str(self.config.reasoning_mode or "auto")
+        if mode == "auto":
+            mode = str(self.spec.config.get("reasoning_mode", "strict") or "strict")
+        return mode
+
+    def _prepare_reasoning(self, model: Any) -> None:
+        """Open the CRANE scratchpad window and passively mine equations.
+
+        The scratchpad is never part of the decoded JSON: it is exposed on
+        :attr:`DecodeResult.reasoning` so a caller can log or search it, while the
+        structured span stays under full Tier-0/1/2 enforcement.
+        """
+
+        self.reasoning = ""
+        self.mined_equations = []
+        if self._reasoning_mode() != "crane_cot":
+            return
+        text = _model_reasoning(model, self.prompt, self.config.reasoning_max_chars)
+        if not text:
+            return
+        controller = CraneModeController()
+        controller.feed(text)
+        self.reasoning = text
+        self.mined_equations = list(dict.fromkeys(controller.mined_equations))
+        self.telemetry.reasoning_chars = len(text)
+        self.telemetry.mined_equations = len(self.mined_equations)
+        self.trace.append(
+            StepTrace(
+                step=self._next_step(),
+                attempt=-1,
+                field_name="<think>",
+                char="",
+                kind="reasoning",
+                note=f"{len(text)} chars, {len(self.mined_equations)} mined equations",
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # attempts
+    # ------------------------------------------------------------------
+    def _run_attempts(self, model: Any, start: float) -> DecodeResult:
         best: DecodeResult | None = None
         attempts = 0
         for attempt in range(self.config.max_backtracks + 1):
@@ -313,6 +431,78 @@ class VeritasSession:
         return best
 
     # ------------------------------------------------------------------
+    # soft preferences (MaxSMT-style steering, never hard constraints)
+    # ------------------------------------------------------------------
+    def _preference_bounds(self, values: Mapping[str, Any]) -> dict[str, tuple[float, float]]:
+        """Derive *soft* domain tightenings from currently violated preferences."""
+
+        bounds: dict[str, tuple[float, float]] = {}
+        for pref in self.spec.soft_preferences:
+            expr = pref.expr
+            if expr is None or getattr(expr, "kind", None) != "compare":
+                continue
+            name, op, const = _unary_preference(expr, self.spec)
+            if name is None or name in self.rules or name not in self._field_index:
+                continue
+            vtype = self.types.get(name)
+            if getattr(vtype, "kind", "real") not in ("real", "int", "float", "number"):
+                continue
+            lo, hi = self._declared_bounds(name)
+            previous = bounds.get(name)
+            if previous is not None:
+                lo, hi = max(lo, previous[0]), min(hi, previous[1])
+            if op in ("ge", "gt"):
+                lo = max(lo, const)
+            elif op in ("le", "lt"):
+                hi = min(hi, const)
+            elif op == "eq":
+                lo, hi = max(lo, const), min(hi, const)
+            else:
+                continue
+            if lo <= hi:
+                bounds[name] = (lo, hi)
+        return bounds
+
+    def _repair_preferences(self, model: Any, best: DecodeResult, start: float) -> DecodeResult:
+        score = _preference_score(best.report)
+        self.telemetry.preference_score = score
+        if score is None or score >= 1.0 - 1e-12:
+            return best
+        saved_overrides = dict(self._overrides)
+        saved_elems = dict(self._elem_overrides)
+        saved_tabu = {key: set(value) for key, value in self._tabu.items()}
+        for _ in range(self.config.max_preference_repairs):
+            bounds = self._preference_bounds(best.values)
+            changed = False
+            for name, (lo, hi) in bounds.items():
+                current = self._soft_overrides.get(name)
+                merged = (max(current[0], lo), min(current[1], hi)) if current else (lo, hi)
+                if merged[0] <= merged[1] and merged != current:
+                    if merged != self._declared_bounds(name):
+                        self._soft_overrides[name] = merged
+                        changed = True
+            if not changed:
+                break
+            self.telemetry.preference_repairs += 1
+            candidate = self._run_attempts(model, start)
+            candidate_score = _preference_score(candidate.report)
+            if not candidate.ok or candidate_score is None or candidate_score <= score + 1e-12:
+                # Soft tightening cannot make a verified result worse; it simply stops
+                # paying off. Restore the learning state of the accepted result.
+                self._overrides = saved_overrides
+                self._elem_overrides = saved_elems
+                self._tabu = saved_tabu
+                break
+            best, score = candidate, candidate_score
+            saved_overrides = dict(self._overrides)
+            saved_elems = dict(self._elem_overrides)
+            saved_tabu = {key: set(value) for key, value in self._tabu.items()}
+            if score >= 1.0 - 1e-12:
+                break
+        self.telemetry.preference_score = score
+        return best
+
+    # ------------------------------------------------------------------
     # attempt lifecycle
     # ------------------------------------------------------------------
     def _reset_attempt(self) -> None:
@@ -322,6 +512,10 @@ class VeritasSession:
         self._partial_numeric = {}
         self._attempt_checkpoints = []
         self._pending_conflicts = []
+        self._field_span = {}
+        self._field_entropy = {}
+        self._field_tokens = {}
+        self._commit_order = []
         self.contractor = self._build_contractor()
 
     def _next_step(self) -> int:
@@ -370,11 +564,16 @@ class VeritasSession:
     # field emission
     # ------------------------------------------------------------------
     def _emit_field(self, name: str, model: Any) -> Any:
-        if name in self.rules:
-            return self._emit_derived(name, model)
-        if name in self.containers:
-            return self._emit_container(name, model)
-        return self._emit_scalar(name, model)
+        start = len(self.text)
+        self._field_entropy[name] = []
+        try:
+            if name in self.rules:
+                return self._emit_derived(name, model)
+            if name in self.containers:
+                return self._emit_container(name, model)
+            return self._emit_scalar(name, model)
+        finally:
+            self._field_span[name] = (start, len(self.text))
 
     def _emit_derived(self, name: str, model: Any) -> Any:
         value = self.zero.evaluate(name, self.values)
@@ -385,10 +584,12 @@ class VeritasSession:
         precision = max(0, int(getattr(self.rules[name], "precision_digits", 6) or 0))
         rendered = json_number(value, precision) if isinstance(value, (int, float)) else json_value(value)
         self.text += rendered
+        self._field_tokens[name] = rendered
         self.telemetry.jump_forward_fields += 1
         self.telemetry.jump_forward_chars += len(rendered)
         self._record(StepTrace, name, rendered, kind="splice",
                      note=f"0-DoF: computed {rendered}")
+        self._plan_splice(name, rendered)
         # A derived value outside the contracted domain is a genuine conflict in an
         # upstream free choice, not a reason to reject the derived field itself.
         vid = self.vid.get(name)
@@ -404,6 +605,44 @@ class VeritasSession:
                         f"[{bound.lo:g}, {bound.hi:g}]",
                     )
         return value
+
+    def _plan_splice(self, name: str, rendered: str) -> None:
+        """Emit a token-healed prefill plan for a deterministic continuation.
+
+        The reference session samples characters, so the splice is already in the text.
+        A production bridge drives the same ``ZeroDofEngine`` and consumes this plan to
+        extend the KV cache in one batched pass, so the plan is recorded with the model's
+        own tokenizer whenever one was supplied.
+        """
+
+        if self.healer is None:
+            return
+        prefix = json_value(name) + ": "
+        span = self._field_span.get(name)
+        value_start = span[0] if span is not None else len(self.text) - len(rendered)
+        # The deterministic continuation starts at this key's opening quote, i.e. after
+        # the previously committed field.
+        cut = max(0, value_start - len(prefix))
+        tail = self.text[:cut]
+        suffix = ", " + prefix + rendered
+        try:
+            prefill = self.healer.heal(tail, suffix)
+        except Exception:  # pragma: no cover - tokenizer protocol violation
+            return
+        self.telemetry.jump_forward_tokens += len(prefill.new_token_ids)
+        if prefill.exact:
+            self.telemetry.token_heal_exact += 1
+        self.splices.append(
+            {
+                "field": name,
+                "value": rendered,
+                "text": suffix,
+                "backup_tokens": prefill.backup_tokens,
+                "token_ids": list(prefill.new_token_ids),
+                "exact": bool(prefill.exact),
+                "offset": prefill.offset,
+            }
+        )
 
     def _upstream_free_field(self, name: str) -> str | None:
         rule = self.rules.get(name)
@@ -425,7 +664,9 @@ class VeritasSession:
         vid = self.vid[name]
         if kind == "int":
             lo, hi = self._bounds(name)
-            text, value = self._emit_number(name, model, (lo, hi), int_only=True, tabu_key=name)
+            text, value = self._emit_number(
+                name, model, (lo, hi), int_only=True, tabu_key=name
+            )
             value = int(round(value))
             self._commit_scalar(name, vid, float(value))
             return value
@@ -459,43 +700,183 @@ class VeritasSession:
             self.text += "null"
             return None
         if kind == "string":
-            value = self._emit_string(name, model)
+            value = self._emit_string(name, model, vtype)
             self.text += json_value(value)
             return value
         raise DeadEnd(name, f"unsupported field type {kind!r} for constrained decoding")
 
-    def _emit_string(self, name: str, model: Any) -> str:
+    def _pattern_for(self, name: str, vtype: Any) -> PatternConstraint | None:
+        """Compile (once) the field's JSON-Schema ``pattern`` into a prefix automaton."""
+
+        if name in self._patterns:
+            return self._patterns[name]
+        constraint: PatternConstraint | None = None
+        raw = getattr(vtype, "pattern", None)
+        if isinstance(raw, str) and raw:
+            try:
+                constraint = PatternConstraint.compile(raw)
+            except UnsupportedPattern as exc:
+                self._patterns[name] = None
+                if raw not in self.telemetry.pattern_fallbacks:
+                    self.telemetry.pattern_fallbacks.append(f"{name}: {exc}")
+                return None
+        self._patterns[name] = constraint
+        return constraint
+
+    def _string_alphabet(self) -> list[str]:
+        return [chr(c) for c in range(0x20, 0x7F) if chr(c) not in {'"', "\\"}]
+
+    def _emit_string(self, name: str, model: Any, vtype: Any = None) -> str:
+        vtype = vtype if vtype is not None else self.types.get(name)
+        min_len = max(0, int(getattr(vtype, "min_len", 0) or 0))
+        declared_max = int(getattr(vtype, "max_len", 0) or 0)
+        limit = self.config.max_string_length
+        if declared_max:
+            limit = min(limit, declared_max)
+        if limit < min_len:
+            raise DeadEnd(
+                name,
+                f"string length bounds are unsatisfiable (min_length={min_len} > "
+                f"max_length={declared_max or self.config.max_string_length})",
+            )
+        constraint = self._pattern_for(name, vtype)
+        # Formatted strings (``date-time``, ``uuid``, ``email``, ...) are validated by the
+        # concrete schema checker, so sampling characters cannot work.  Emit a witness for
+        # the format instead -- deterministically, in zero sampled tokens -- and let the
+        # verifier confirm it.  Anything unsupported degrades to length/pattern masking
+        # with an explicit telemetry entry.
+        fmt = getattr(vtype, "text_format", None)
+        if fmt:
+            candidate = textformats.witness(fmt, min_len=min_len, max_len=limit)
+            if candidate is not None and (constraint is None or constraint.satisfied(candidate)):
+                self.telemetry.format_witnesses += 1
+                self._record(
+                    StepTrace,
+                    name,
+                    candidate,
+                    kind="format",
+                    note=f"format {fmt!r} witness",
+                )
+                return candidate
+            reason = (
+                "witness violates the declared pattern"
+                if candidate is not None
+                else f"no witness inside length window for format {fmt!r}"
+            )
+            entry = f"{name}: {reason}"
+            if entry not in self.telemetry.format_fallbacks:
+                self.telemetry.format_fallbacks.append(entry)
+        alphabet = self._string_alphabet()
         chars: list[str] = []
-        for _ in range(self.config.max_string_length + 1):
-            actions = [chr(c) for c in range(0x20, 0x7F) if chr(c) not in {'"', "\\"}]
-            stop_ok = len(chars) >= 1
-            if stop_ok:
-                actions = [_STOP] + actions
-            if len(chars) >= self.config.max_string_length:
-                if not stop_ok:
-                    raise DeadEnd(name, "string exceeds maximum length")
-                actions = [_STOP]
-            choice = self._pick(name, model, self.text, actions, candidates=96)
+        while True:
+            prefix = "".join(chars)
+            actions: list[str] = []
+            if len(chars) < limit:
+                if constraint is None:
+                    actions = list(alphabet)
+                else:
+                    actions = constraint.allowed_next(prefix, alphabet)
+                    self.telemetry.string_mask_prunes += max(0, len(alphabet) - len(actions))
+            can_stop = len(chars) >= min_len and (
+                constraint is None or constraint.can_stop(prefix)
+            )
+            if can_stop:
+                actions.insert(0, _STOP)
+            if not actions:
+                raise DeadEnd(
+                    name,
+                    f"string prefix {prefix!r} has no admissible continuation "
+                    f"(min_length={min_len}, pattern={getattr(vtype, 'pattern', None)!r})",
+                )
+            choice = self._pick(
+                name, model, self.text + prefix, actions, candidates=len(alphabet) + 1
+            )
             if choice == _STOP:
-                return "".join(chars)
+                return prefix
             chars.append(choice)
-            self.text += choice
             self._record(StepTrace, name, choice)
-        raise DeadEnd(name, "string did not terminate")
+        # The *caller* appends ``json_value(value)`` once the literal is complete.  Writing
+        # the raw characters into the document here as well duplicated every string field
+        # (``"name": 99"99"``), which made the JSON PDA reject the attempt and silently
+        # fall back to canonical rendering.  Keep the sampled prefix local instead.
+
+    def _exclusive_for(self, name: str) -> tuple[bool, bool]:
+        """Open-bound flags that still matter after integer promotion."""
+
+        if getattr(self.types.get(name), "kind", None) == "int":
+            return (False, False)
+        return self._exclusive.get(name, (False, False))
+
+    def _upstream_culprit(self, name: str) -> str:
+        """The most recent free field committed before ``name``."""
+
+        for other in reversed(self._commit_order):
+            if other != name and other not in self.rules:
+                return other
+        return name
+
+    def _open_domain_conflict(self) -> str | None:
+        """Pending field whose contracted domain admits no *strictly interior* value."""
+
+        for pending in self.fields:
+            if pending in self.values or pending in self.rules:
+                continue
+            vid = self.vid.get(pending)
+            if vid is None or vid not in self.contractor.domains:
+                continue
+            bound = self.contractor.get_bounds(vid)
+            if bound.is_empty():
+                return pending
+            lo_ex, hi_ex = self._exclusive_for(pending)
+            if not (lo_ex or hi_ex):
+                continue
+            declared_lo, declared_hi = self._declared_bounds(pending)
+            if bound.lo == bound.hi:
+                value = bound.lo
+                if (lo_ex and value <= declared_lo + 1e-12) or (
+                    hi_ex and value >= declared_hi - 1e-12
+                ):
+                    return pending
+        return None
 
     def _commit_scalar(self, name: str, vid: int, value: float) -> None:
         # Record the assignment before propagation so a conflict can name this field as
         # the culprit and cut its domain on the next attempt.
         self.values[name] = value
+        self._commit_order.append(name)
         if vid not in self.contractor.domains:
             return
         # Propagating a rejected assignment must not poison the contractor: restore the
         # pre-assignment domains so the next attempt still has a usable feasible box.
         saved = {key: Interval(bound.lo, bound.hi) for key, bound in self.contractor.domains.items()}
-        self.contractor.set_domain(vid, Interval(value, value))
-        if not self.contractor.propagate():
+        # The literal was chosen from a domain that was contracted with *outward-rounded*
+        # arithmetic, so an exact point assignment can sit up to a few ULPs outside the
+        # intersection the contractor can re-prove.  Widening the point by a handful of
+        # ULPs keeps float noise from masquerading as infeasibility; a genuinely
+        # infeasible assignment still fails on every attempt.
+        slack = max(abs(value) * 8 * 2.220446049250313e-16, 1e-12)
+        attempts = [Interval(value, value), Interval(value - slack, value + slack)]
+        propagated = False
+        for domain in attempts:
+            self.contractor.domains = {k: Interval(v.lo, v.hi) for k, v in saved.items()}
+            self.contractor.set_domain(vid, domain)
+            if self.contractor.propagate():
+                propagated = True
+                break
+        if not propagated:
             self.contractor.domains = saved
-            raise DeadEnd(name, f"contractor became infeasible after {name}={value:g}")
+            raise DeadEnd(
+                self._upstream_culprit(name),
+                f"contractor became infeasible after {name}={value:g}",
+            )
+        blocked = self._open_domain_conflict()
+        if blocked is not None:
+            # ``name`` consumed the room that ``blocked`` needed (e.g. an open bound).
+            self.contractor.domains = saved
+            raise DeadEnd(
+                name,
+                f"after {name}={value:g}, open-bounded field {blocked!r} has no admissible value",
+            )
 
     # ------------------------------------------------------------------
     # numeric emission
@@ -517,10 +898,29 @@ class VeritasSession:
             hi = getattr(vtype, "max", None)
             lo = float(lo) if lo is not None else float("-inf")
             hi = float(hi) if hi is not None else float("inf")
-        override = self._overrides.get(name)
-        if override is not None:
-            lo = max(lo, override[0])
-            hi = min(hi, override[1])
+        vtype = self.types.get(name)
+        # ``_initial_domains`` comes from the contractor, whose bounds are rounded
+        # outwards by up to one ULP.  Clamping back onto the declared type bounds keeps
+        # "is this value the excluded endpoint?" decidable (``lt=1`` must reject 1 even
+        # when the contractor advertises 1.0000000000000004).
+        declared_lo = getattr(vtype, "min", None)
+        declared_hi = getattr(vtype, "max", None)
+        if declared_lo is not None and math.isfinite(float(declared_lo)):
+            lo = max(lo, float(declared_lo))
+        if declared_hi is not None and math.isfinite(float(declared_hi)):
+            hi = min(hi, float(declared_hi))
+        for source in (self._soft_overrides, self._overrides):
+            override = source.get(name)
+            if override is not None:
+                lo = max(lo, override[0])
+                hi = min(hi, override[1])
+        if getattr(self.types.get(name), "kind", None) == "int":
+            # Open integer bounds have a closed integer equivalent: (0, 5) == [1, 4].
+            lo_ex, hi_ex = self._exclusive.get(name, (False, False))
+            if lo_ex and math.isfinite(lo):
+                lo = math.floor(lo) + 1
+            if hi_ex and math.isfinite(hi):
+                hi = math.ceil(hi) - 1
         return lo, hi
 
     def _bounds(self, name: str) -> tuple[float, float]:
@@ -541,46 +941,157 @@ class VeritasSession:
         *,
         int_only: bool = False,
         tabu_key: Any = None,
+        exclusive: tuple[bool, bool] | None = None,
+        declared: tuple[float, float] | None = None,
     ) -> tuple[str, float]:
         lo, hi = bounds
+        if declared is None and name in self.types:
+            declared = self._declared_bounds(name)
+        if exclusive is None:
+            exclusive = self._exclusive_for(name)
         if lo > hi + 1e-12:
-            raise DeadEnd(name, f"empty numeric domain [{lo:g}, {hi:g}]")
+            raise DeadEnd(
+                self._upstream_culprit(name),
+                f"empty numeric domain [{lo:g}, {hi:g}] for {name!r}",
+            )
         interval = Interval(lo, hi)
-        prefix = ""
-        local_steps = 0
-        while True:
-            local_steps += 1
-            if local_steps > self.config.max_steps or self._step > self.config.max_steps:
-                raise DeadEnd(name, "step budget exhausted")
+        budget = [max(1, int(getattr(self.config, "max_number_nodes", 512) or 1))]
+
+        def search(prefix: str, depth: int) -> tuple[str, float] | None:
+            # A number literal is short; the depth cap keeps the recursion finite even for
+            # malformed configurations, and the node budget bounds the total work so a
+            # hostile model cannot turn a single field into an unbounded search.
+            if depth > 40 or self._step + depth > self.config.max_steps:
+                return None
             actions: list[str] = []
             for ch in "0123456789.-":
                 candidate = prefix + ch
                 if not self._number_prefix_ok(candidate, int_only):
                     continue
-                if Interval.from_numeric_prefix(candidate, interval, self.config.allow_exponent).is_empty():
+                if Interval.from_numeric_prefix(
+                    candidate, interval, self.config.allow_exponent
+                ).is_empty():
                     self.telemetry.contractor_prunes += 1
                     continue
                 actions.append(ch)
-            stop_ok = self._number_stop_ok(prefix, interval, int_only, tabu_key)
-            if stop_ok:
-                actions.insert(0, _STOP)
-            if not actions:
-                raise DeadEnd(name, f"no admissible continuation for number prefix {prefix!r} in [{lo:g}, {hi:g}]")
+            stop_ok = self._number_stop_ok(
+                prefix, interval, int_only, tabu_key, exclusive, name, declared
+            )
+            choices = ([_STOP] if stop_ok else []) + actions
+            # The local grammar has twelve numeric characters plus the stop token; every
+            # one that is absent from ``choices`` was masked by the reachable interval.
+            self.telemetry.masked_candidates += max(0, 13 - len(choices))
+            if not choices:
+                return None
+            for choice in self._ordered_actions(name, model, self.text + prefix, choices):
+                budget[0] -= 1
+                if budget[0] <= 0:
+                    # Out of budget: stop exploring and let the deterministic constructor
+                    # below pick a feasible literal instead of failing the attempt.
+                    return None
+                if choice == _STOP:
+                    value = float(prefix)
+                    return prefix, (float(int(round(value))) if int_only else value)
+                self.telemetry.number_expansions += 1
+                found = search(prefix + choice, depth + 1)
+                if found is not None:
+                    return found
+            return None
 
-            choice = self._pick(name, model, self.text + prefix, actions, candidates=13)
-            if choice != _STOP:
-                prefix += choice
-                try:
-                    self._partial_numeric[name] = float(prefix)
-                except ValueError:
-                    pass
-            if choice == _STOP:
-                value = float(prefix)
-                if int_only:
-                    value = float(int(round(value)))
-                return prefix, value
-            self.text += choice
-            self._record(StepTrace, name, choice, allowed=len(actions))
+        found = search("", 0)
+        if found is None:
+            found = self._canonical_number(
+                interval, int_only, tabu_key, exclusive, name, declared
+            )
+        if found is None:
+            raise DeadEnd(
+                self._upstream_culprit(name),
+                f"no representable number in [{lo:g}, {hi:g}] for {name!r} "
+                f"(digits, stop and backtracking all exhausted)",
+            )
+        literal, value = found
+        for ch in literal:
+            self.text += ch
+            self.telemetry.sampled_units += 1
+            self._record(StepTrace, name, ch, kind="sample")
+        self._partial_numeric[name] = value
+        return literal, value
+
+    def _canonical_number(
+        self,
+        interval: Interval,
+        int_only: bool,
+        tabu_key: Any,
+        exclusive: tuple[bool, bool] | None,
+        name: str,
+        declared: tuple[float, float] | None,
+    ) -> tuple[str, float] | None:
+        """Construct one feasible literal directly when the search gives up.
+
+        Model-preferred digits can descend into a decimal dead end that is exponentially
+        large to exhaust (``0.000000`` and siblings while the only feasible values sit
+        near the middle of the interval).  A bounded number of deterministic candidates --
+        the interior of the reachable interval, formatted with the configured precision --
+        keeps the field time-bounded *without* ever emitting an unverified value: every
+        candidate still passes ``_number_stop_ok``.
+        """
+
+        lo, hi = interval.lo, interval.hi
+        digits = max(0, int(self.config.max_fraction_digits))
+        candidates: list[float] = []
+        if int_only:
+            low = math.ceil(lo) if math.isfinite(lo) else -10**6
+            high = math.floor(hi) if math.isfinite(hi) else 10**6
+            if low > high:
+                return None
+            candidates = [(low + high) // 2, low, high]
+        elif math.isfinite(lo) and math.isfinite(hi):
+            span = hi - lo
+            candidates = [lo + span / 2, lo + span / 4, lo + span * 3 / 4, lo, hi]
+        elif math.isfinite(hi):
+            candidates = [hi - 1.0, hi - max(1.0, abs(hi)) / 2, hi]
+        elif math.isfinite(lo):
+            candidates = [lo + 1.0, lo + max(1.0, abs(lo)) / 2, lo]
+        else:
+            candidates = [0.0, 0.5, 1.0, -0.5]
+        for value in candidates:
+            if not math.isfinite(value):
+                continue
+            if int_only:
+                text = str(int(value))
+            else:
+                text = f"{value:.{digits}f}"
+                if "." in text:
+                    text = text.rstrip("0").rstrip(".")
+                if text in ("", "-"):
+                    text = "0"
+            if not self._number_prefix_ok(text, int_only):
+                continue
+            if self._number_stop_ok(
+                text, interval, int_only, tabu_key, exclusive, name, declared
+            ):
+                return text, float(text)
+        return None
+
+    def _ordered_actions(
+        self, name: str, model: Any, prefix: str, actions: Sequence[str]
+    ) -> list[str]:
+        """Order candidate continuations by model preference (best first)."""
+
+        if len(actions) <= 1:
+            return list(actions)
+        logits = self._logits(model, prefix)
+        scores: list[tuple[float, int, str]] = []
+        for position, action in enumerate(actions):
+            score = logits.get(action)
+            score = float(score) if isinstance(score, (int, float)) else float("-inf")
+            if self.config.temperature and self.config.temperature > 0:
+                score /= float(self.config.temperature)
+            scores.append((score, -position, action))
+        scores.sort(reverse=True)
+        ordered = [action for _, _, action in scores]
+        self._last_entropy = _entropy(_softmax([score for score, _, _ in scores]))
+        return ordered
 
     def _number_prefix_ok(self, prefix: str, int_only: bool) -> bool:
         if prefix == "":
@@ -617,6 +1128,9 @@ class VeritasSession:
         interval: Interval,
         int_only: bool,
         tabu_key: Any,
+        exclusive: tuple[bool, bool] = (False, False),
+        name: str | None = None,
+        declared: tuple[float, float] | None = None,
     ) -> bool:
         if not prefix or prefix == "-" or prefix.endswith("."):
             return False
@@ -627,6 +1141,27 @@ class VeritasSession:
         value = float(prefix)
         if value < interval.lo - 1e-12 or value > interval.hi + 1e-12:
             return False
+        # ``gt``/``lt`` declare an open bound: the exact declared endpoint is never a
+        # valid value, even when the contracted interval has been rounded outwards.
+        if exclusive[0] or exclusive[1]:
+            # The reference range is the *declared* one (type bounds for scalar
+            # fields, the analysed element range for container slots), never the
+            # contracted interval: a constraint may legitimately narrow a domain to a
+            # point that is still interior to the open bound.
+            lower: float | None = None
+            upper: float | None = None
+            if declared is not None:
+                lower, upper = declared
+            else:
+                vtype = self.types.get(name) if name else None
+                raw_lo = getattr(vtype, "min", None)
+                raw_hi = getattr(vtype, "max", None)
+                lower = None if raw_lo is None else float(raw_lo)
+                upper = None if raw_hi is None else float(raw_hi)
+            if exclusive[0] and lower is not None and value <= lower + 1e-12:
+                return False
+            if exclusive[1] and upper is not None and value >= upper - 1e-12:
+                return False
         if tabu_key is not None and self._is_tabu(tabu_key, value):
             return False
         return True
@@ -689,7 +1224,7 @@ class VeritasSession:
             self.text += "null"
             return None
         if kind == "string":
-            value = self._emit_string(path, model)
+            value = self._emit_string(path, model, vtype)
             self.text += json_value(value)
             return value
         raise DeadEnd(path, f"unsupported nested type {kind!r}")
@@ -711,7 +1246,15 @@ class VeritasSession:
                 self.text += ", "
             if numeric_item and info is not None:
                 lo, hi = self._element_bounds(name, str(index), info, total, index)
-                _text, value = self._emit_number(name, model, (lo, hi), tabu_key=(name, index))
+                _text, value = self._emit_number(
+                    name,
+                    model,
+                    (lo, hi),
+                    int_only=getattr(item_type, "kind", None) == "int",
+                    exclusive=(info.elem_min_exclusive, info.elem_max_exclusive),
+                    declared=(lo, hi),
+                    tabu_key=(name, index),
+                )
                 total += value
                 result.append(value)
             else:
@@ -770,7 +1313,13 @@ class VeritasSession:
                 self.text += ", "
             self.text += json_value(key) + ": "
             _text, value = self._emit_number(
-                name, model, (lo, hi), tabu_key=(name, key)
+                name,
+                model,
+                (lo, hi),
+                int_only=getattr(item_type, "kind", None) == "int",
+                exclusive=(info.elem_min_exclusive, info.elem_max_exclusive),
+                declared=(lo, hi),
+                tabu_key=(name, key),
             )
             first = False
             result[key] = value
@@ -830,22 +1379,60 @@ class VeritasSession:
     # ------------------------------------------------------------------
     # sampling
     # ------------------------------------------------------------------
+    def _volume_twist(
+        self, field_name: str, prefix: str, actions: Sequence[str]
+    ) -> list[float]:
+        """SHIM-style future-volume correction over numeric continuations.
+
+        ``log Vol(D_{t+1} | prefix + action) - log Vol(D_t)`` is estimated by intersecting
+        the field's domain with the prefix interval and running one contractor pass.  When
+        the field has no contracted domain (containers, unconstrained numbers) the 1-D
+        interval width is used instead, which is the exact analogue for a single axis.
+        """
+
+        adjustments = [0.0] * len(actions)
+        beta = float(self.config.volume_twist_beta)
+        if not beta or field_name not in self.vid:
+            return adjustments
+        kind = getattr(self.types.get(field_name), "kind", None)
+        if kind not in ("real", "float", "number", "int"):
+            return adjustments
+        vid = self.vid[field_name]
+        lo, hi = self._bounds(field_name)
+        base_width = max(hi - lo, 1e-12)
+        use_contractor = (
+            vid in self.contractor.domains and len(self.contractor.constraints) <= 64
+        )
+        base_log = self.contractor.current_log_volume() if use_contractor else None
+        for index, action in enumerate(actions):
+            if action == _STOP:
+                continue
+            interval = Interval.from_numeric_prefix(
+                prefix + action, Interval(lo, hi), self.config.allow_exponent
+            )
+            if interval.is_empty():
+                continue
+            adjustment = 0.0
+            if use_contractor and base_log is not None and math.isfinite(base_log):
+                remaining = self.contractor.estimate_log_volume_after(vid, interval)
+                if math.isfinite(remaining):
+                    adjustment = beta * (remaining - base_log)
+            else:
+                width = interval.width()
+                if math.isfinite(width):
+                    adjustment = beta * math.log(max(width, 1e-12) / base_width)
+            if adjustment:
+                adjustments[index] = adjustment
+                self.telemetry.twist_adjustments += 1
+        return adjustments
+
     def _pick(self, field_name: str, model: Any, prefix: str, actions: Sequence[str], candidates: int = 0) -> str:
         logits = self._logits(model, prefix)
         scores = [float(logits.get(action, 0.0)) for action in actions]
-        if self.config.volume_twist_beta and field_name in self.vid:
-            # 1-D SHIM-style adjustment: prefer continuations that leave the widest
-            # feasible interval.  This is the interval analogue of polytope volume.
-            lo, hi = self._bounds(field_name)
-            for index, action in enumerate(actions):
-                if action == _STOP:
-                    continue
-                candidate = prefix + action
-                interval = Interval.from_numeric_prefix(candidate, Interval(lo, hi))
-                width = interval.width()
-                base = max(hi - lo, 1e-12)
-                if math.isfinite(width):
-                    scores[index] += self.config.volume_twist_beta * math.log(max(width, 1e-12) / base)
+        if self.config.volume_twist_beta:
+            adjustments = self._volume_twist(field_name, prefix, actions)
+            if any(adjustments):
+                scores = [score + delta for score, delta in zip(scores, adjustments)]
         entropy, choice = self._select(actions, scores)
         self.telemetry.masked_candidates += max(0, candidates - len(actions)) if candidates else 0
         self.telemetry.sampled_units += 1
@@ -898,6 +1485,9 @@ class VeritasSession:
         allowed: int = 0,
         note: str = "",
     ) -> None:
+        entropy = float(getattr(self, "_last_entropy", 0.0) or 0.0)
+        if field_name:
+            self._field_entropy.setdefault(field_name, []).append(entropy)
         if cls is StepTrace:
             self.trace.append(
                 StepTrace(
@@ -907,7 +1497,7 @@ class VeritasSession:
                     char=text,
                     kind=kind,
                     allowed=allowed,
-                    entropy=getattr(self, "_last_entropy", 0.0),
+                    entropy=entropy,
                     note=note,
                 )
             )
@@ -915,60 +1505,99 @@ class VeritasSession:
     # ------------------------------------------------------------------
     # backtracking / domain cuts
     # ------------------------------------------------------------------
-    def _apply_report_cut(self, report: VerificationReport, text: str) -> bool:
-        self._attempt_checkpoints = []
+    def _attempt_checkpoints_for_report(self) -> list[ClauseCheckpoint]:
+        """One checkpoint per free field, carrying real spans, entropy and conflict counts."""
+
+        checkpoints: list[ClauseCheckpoint] = []
         for name in self.fields:
             if name in self.rules:
                 continue
             value = self.values.get(name)
-            number = as_number(value) if not isinstance(value, dict) else None
-            self._attempt_checkpoints.append(
+            number = as_number(value) if not isinstance(value, (dict, list)) else None
+            start, end = self._field_span.get(name, (0, 0))
+            entropies = self._field_entropy.get(name) or [0.0]
+            committed = float(number) if number is not None else 0.0
+            checkpoints.append(
                 ClauseCheckpoint(
-                    clause_id=self._field_clause_index.get(name, 0),
+                    clause_id=self._field_index[name],
                     var_id=name,
-                    committed_val=number if number is not None else 0.0,
-                    start_token_idx=0,
-                    end_token_idx=len(text),
-                    mean_shannon_entropy=1.0,
-                    token_sequence=[json_value(value)] if value is not None else [],
-                    conflict_count=0,
+                    committed_val=committed,
+                    start_token_idx=start,
+                    end_token_idx=end,
+                    mean_shannon_entropy=sum(entropies) / len(entropies),
+                    token_sequence=[self.text[start:end]] if end > start else [],
+                    conflict_count=self._conflict_counts.get(name, 0),
                 )
             )
+        return checkpoints
+
+    def _core_fields(self, report: VerificationReport) -> list[str]:
+        """Free fields referenced by the violated constraints, latest first."""
+
+        names: list[str] = []
+        for index in report.unsat_core:
+            for name in self._clause_fields.get(index, []):
+                if name not in self.rules and name not in names:
+                    names.append(name)
+        if not names:
+            names = [name for name in self.fields if name not in self.rules]
+        order = self._field_index
+        return sorted(names, key=lambda name: order.get(name, -1))
+
+    def _apply_report_cut(self, report: VerificationReport, text: str) -> bool:
+        self._attempt_checkpoints = self._attempt_checkpoints_for_report()
         self.cdcl.checkpoints.extend(self._attempt_checkpoints)
-        culprit_name = None
-        if report.unsat_core:
-            self.cdcl.jumpback(report.unsat_core)
-            culprit = self.cdcl.select_culprit(report.unsat_core)
-            if culprit is not None:
+        candidates = self._core_fields(report)
+        culprit_name: str | None = None
+        if candidates and self._attempt_checkpoints:
+            core_ids = [self._field_index[name] for name in candidates]
+            self.cdcl.jumpback(core_ids)
+            culprit = self.cdcl.select_culprit(core_ids)
+            if culprit is not None and culprit.var_id in self._field_index:
                 culprit_name = str(culprit.var_id)
         if culprit_name is None:
             culprit_name = self._culprit_from_report(report)
+        margin = 0.0
+        for outcome in report.violations:
+            if outcome.residual is not None:
+                margin = max(margin, abs(outcome.residual))
+        span = self._field_span.get(culprit_name or "", (0, len(text)))
         record = ConflictBranchRecord(
-            prefix_tokens=[text],
-            rejected_clause_tokens=[],
+            prefix_tokens=[text[: span[0]]],
+            rejected_clause_tokens=[text[span[0]: span[1]]] if span[1] > span[0] else [],
             unsat_core_ids=list(report.unsat_core),
-            violation_margin=abs(report.violations[0].residual) if report.violations and report.violations[0].residual is not None else 0.0,
+            violation_margin=margin,
         )
         record.prompt = self.prompt
         record.rejected = text
         record.metadata.setdefault("spec_digest", self.telemetry.spec_digest)
+        record.metadata.setdefault("culprit_field", culprit_name)
+        record.metadata.setdefault("status", report.status)
         self._pending_conflicts.append(record)
         self.rl.record_conflict_branch(None, None, report.unsat_core, record=record)
+        if culprit_name is not None:
+            self._conflict_counts[culprit_name] = self._conflict_counts.get(culprit_name, 0) + 1
         return self._cut_for_field(culprit_name)
 
     def _culprit_from_report(self, report: VerificationReport) -> str | None:
-        by_index = {clause.index: clause for clause in self.clauses}
+        free = [field for field in self.fields if field not in self.rules]
         candidates: list[str] = []
+        by_index = {clause.index: clause for clause in self.clauses}
         for outcome in report.violations:
             clause = by_index.get(outcome.index)
             if clause is None:
+                # A structural (JSON-Schema) failure names the offending field(s) in its
+                # message; prefer the earliest such field in emission order.
+                for name in free:
+                    if name in outcome.text and name not in candidates:
+                        candidates.append(name)
                 continue
             for vid in collect_var_ids(clause.expr):
                 name = self.spec.id_to_name.get(vid)
-                if name in self.fields and name not in self.rules:
+                if name in free and name not in candidates:
                     candidates.append(name)
         if not candidates:
-            candidates = [f for f in self.fields if f not in self.rules]
+            candidates = free
         if not candidates:
             return None
         return candidates[-1]
@@ -1019,6 +1648,8 @@ class VeritasSession:
                 self.telemetry.domain_cuts.append(
                     {"field": name, "value": number, "bounds": [new_lo, new_hi]}
                 )
+                if name not in self.telemetry.backtrack_fields:
+                    self.telemetry.backtrack_fields.append(name)
                 return True
         return False
 
@@ -1045,12 +1676,92 @@ class VeritasSession:
             {"field": f"{name}[{key!r}]", "value": value,
              "bounds": list(self._elem_overrides[(name, key)])}
         )
+        label = f"{name}[{key!r}]"
+        if label not in self.telemetry.backtrack_fields:
+            self.telemetry.backtrack_fields.append(label)
         return True
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _has_tokenizer(tokenizer: Any) -> bool:
+    if tokenizer is None:
+        return False
+    return callable(getattr(tokenizer, "encode", None)) and callable(
+        getattr(tokenizer, "decode", None)
+    )
+
+
+def _model_reasoning(model: Any, prompt: str, max_chars: int) -> str:
+    """Ask the model for a CRANE scratchpad, if it can produce one.
+
+    Two protocols are accepted: ``next_reasoning(prompt) -> str`` and a plain
+    ``reasoning`` attribute holding pre-generated text.  Anything else yields no
+    scratchpad instead of inventing one.
+    """
+
+    getter = getattr(model, "next_reasoning", None)
+    text: Any = None
+    if callable(getter):
+        try:
+            text = getter(prompt)
+        except TypeError:
+            try:
+                text = getter()
+            except Exception:
+                text = None
+        except Exception:
+            text = None
+    if not isinstance(text, str):
+        candidate = getattr(model, "reasoning", None)
+        text = candidate if isinstance(candidate, str) else None
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    text = text.strip()
+    limit = max(0, int(max_chars or 0))
+    return text[:limit] if limit else text
+
+
+def _preference_score(report: VerificationReport | None) -> float | None:
+    """Weighted fraction of soft preferences satisfied (``None`` when there are none)."""
+
+    if report is None or not report.preferences:
+        return None
+    total = 0.0
+    got = 0.0
+    for outcome in report.preferences:
+        weight = float(outcome.weight if outcome.weight and outcome.weight > 0 else 1.0)
+        total += weight
+        if outcome.satisfied is True:
+            got += weight
+    if total <= 0:
+        return None
+    return got / total
+
+
+def _unary_preference(expr: Any, spec: VirSpec) -> tuple[str | None, str, float]:
+    """Extract ``(field, op, constant)`` from ``p.field OP const`` preferences."""
+
+    from .compiler.analysis import _const_number  # constant folding helper
+
+    lhs = getattr(expr, "lhs", None)
+    rhs = getattr(expr, "rhs", None)
+    op = str(getattr(expr, "op", ""))
+    flip = {"le": "ge", "lt": "gt", "ge": "le", "gt": "lt", "eq": "eq"}
+    for target, other, direction in ((lhs, rhs, False), (rhs, lhs, True)):
+        if target is None or getattr(target, "kind", None) != "var":
+            continue
+        const = _const_number(other)
+        if const is None:
+            continue
+        name = spec.id_to_name.get(getattr(target, "var_id", None))
+        if name is None:
+            continue
+        return name, (flip.get(op, op) if direction else op), float(const)
+    return None, op, 0.0
+
 
 def _softmax(scores: Sequence[float]) -> list[float]:
     if not scores:
@@ -1088,6 +1799,11 @@ def generate(
     config: DecodeConfig | None = None,
     max_backtracks: int | None = None,
     temperature: float | None = None,
+    volume_twist_beta: float | None = None,
+    reasoning_mode: str | None = None,
+    max_preference_repairs: int | None = None,
+    seed: int | None = None,
+    token_healing: bool = True,
     **kwargs: Any,
 ) -> VerifiedResult:
     """Run constrained decoding for ``spec`` and return a verified result.
@@ -1104,12 +1820,29 @@ def generate(
             "generate() requires a model adapter; use veritas.testing.mock_model() for a "
             "deterministic reference run, or a veritas.bridges adapter for a real model"
         )
+    if kwargs:
+        raise TypeError(f"generate() got unexpected keyword arguments: {sorted(kwargs)}")
     cfg = config or DecodeConfig()
     if max_backtracks is not None:
         cfg.max_backtracks = int(max_backtracks)
     if temperature is not None:
         cfg.temperature = float(temperature)
-    session = VeritasSession(spec, model, cfg)
+    if volume_twist_beta is not None:
+        beta = float(volume_twist_beta)
+        if not math.isfinite(beta) or beta < 0:
+            raise ValueError("volume_twist_beta must be a finite non-negative number")
+        cfg.volume_twist_beta = beta
+    if reasoning_mode is not None:
+        if reasoning_mode not in ("auto", "strict", "crane_cot"):
+            raise ValueError("reasoning_mode must be auto, strict or crane_cot")
+        cfg.reasoning_mode = reasoning_mode
+    if max_preference_repairs is not None:
+        cfg.max_preference_repairs = max(0, int(max_preference_repairs))
+    if seed is not None:
+        cfg.seed = seed
+    session = VeritasSession(
+        spec, model, cfg, tokenizer=tokenizer if token_healing else None
+    )
     result = session.run(model, prompt=prompt or "")
     proof: ProofCertificate | None = None
     if return_proof and result.report.status == "PASS":
@@ -1127,8 +1860,10 @@ def generate(
     value: Any = result.report.model if result.report.model is not None else result.values
     return VerifiedResult(
         value=value,
-        reasoning="",
+        reasoning=result.reasoning,
         proof=proof,
+        splices=list(result.splices),
+        mined_equations=list(result.mined_equations),
         telemetry=result.telemetry.as_dict(),
         report=result.report,
         raw=result.text,

@@ -25,8 +25,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from numbers import Number as _NumberABC
 from typing import Any
 
+#: Backwards-compatible alias used by call sites that only need concrete numerics.
 Number = (int, float)
 MISSING = object()  # distinct from a present JSON null
 
@@ -54,15 +56,19 @@ def as_number(value: Any) -> float | None:
 
     if isinstance(value, bool):
         return None
-    if isinstance(value, Number):
-        try:
-            out = float(value)
-        except (OverflowError, ValueError):
-            return None
-        if not math.isfinite(out):
-            return None
-        return out
-    return None
+    if not isinstance(value, _NumberABC):
+        return None
+    # ``Decimal`` and ``Fraction`` are ``Number`` but not ``Real``; both convert exactly
+    # enough for constraint checking (``Decimal`` from a Pydantic field, for instance).
+    if isinstance(value, complex) and not isinstance(value, (int, float)):
+        return None
+    try:
+        out = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
 
 
 def as_sequence(value: Any) -> list[Any] | None:

@@ -38,11 +38,32 @@ INCOMPLETE = "INCOMPLETE"
 # ---------------------------------------------------------------------------
 
 class VerificationError(Exception):
-    """Raised when a concrete instance violates a schema's hard constraints."""
+    """Raised when a concrete instance violates a schema's hard constraints.
+
+    The message carries the summary line *and* the first few concrete reasons, because
+    "0 satisfied, 0 violated, 1 unevaluated" on its own tells a caller nothing about
+    which field or constraint to fix.
+    """
 
     def __init__(self, report: VerificationReport):
         self.report = report
-        super().__init__(report.summary_line())
+        super().__init__(self._message(report))
+
+    @staticmethod
+    def _message(report: VerificationReport, limit: int = 3) -> str:
+        summary = report.summary_line()
+        reasons: list[str] = []
+        for outcome in report.violations:
+            reasons.append(f"violated: {outcome.text}")
+        for outcome in report.unknown:
+            reasons.append(f"unevaluated: {outcome.text}")
+        if report.missing:
+            reasons.append("missing required field(s): " + ", ".join(report.missing))
+        if not reasons and report.model_error:
+            reasons.append(str(report.model_error).splitlines()[0])
+        if not reasons:
+            return summary
+        return summary + "\n  " + "\n  ".join(reasons[:limit])
 
 
 class InstanceFormatError(ValueError):
@@ -404,36 +425,123 @@ def _canonical_fields(spec: VirSpec, data: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _validate_structure(spec: VirSpec, data: Mapping[str, Any]) -> str | None:
+def _schema_error(spec: VirSpec, data: Mapping[str, Any], *, include_required: bool):
+    """Run the portable JSON Schema and return the first ``ValidationError``.
+
+    Missing derived fields are allowed only during the derivation pass, so
+    ``include_required=False`` drops the ``required`` keyword; presence is checked
+    again after derivation.
+    """
+
     if spec.model_schema is None:
         return None
     import copy
 
     from jsonschema import Draft202012Validator, FormatChecker
+
     payload = {}
     for key, value in data.items():
         name = next((n for n, alias in spec.field_aliases.items() if key == n), key)
         payload[spec.field_aliases.get(name, key)] = value
     schema = copy.deepcopy(spec.model_schema)
-    # Missing derived fields are allowed only during the derivation pass.
-    # Presence is checked after derivation; this pass validates supplied values only.
-    schema.pop("required", None)
+    if not include_required:
+        schema.pop("required", None)
+    from jsonschema.exceptions import ValidationError
+
     try:
-        Draft202012Validator(schema, format_checker=FormatChecker()).validate(_json_data(payload))
-    except Exception as exc:
-        return f"schema validation: {exc}"
+        payload_json = _json_data(payload)
+    except (TypeError, ValueError) as exc:
+        # The instance holds a value that has no JSON form.  That is an *interpretation*
+        # failure, not a schema violation, and must not be reported as a FAIL verdict.
+        raise InstanceFormatError(f"cannot interpret instance as JSON: {exc}") from exc
+    try:
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(payload_json)
+    except ValidationError as exc:
+        return exc
     return None
+
+
+def _validate_structure(spec: VirSpec, data: Mapping[str, Any]) -> str | None:
+    error = _schema_error(spec, data, include_required=False)
+    return None if error is None else f"schema validation: {error}"
 
 
 def _validate_structure_required(spec, data):
-    if spec.model_schema is None:
-        return None
-    from jsonschema import Draft202012Validator, FormatChecker
-    try:
-        Draft202012Validator(spec.model_schema, format_checker=FormatChecker()).validate(_json_data(data))
-    except Exception as exc:
-        return f"schema validation: {exc}"
-    return None
+    error = _schema_error(spec, data, include_required=True)
+    return None if error is None else f"schema validation: {error}"
+
+
+def _schema_error_leaves(error: Any) -> list[tuple[tuple[str, ...], str, str]]:
+    """Flatten a ``ValidationError`` tree into ``(path, keyword, message)`` leaves."""
+
+    leaves: list[tuple[tuple[str, ...], str, str]] = []
+
+    def walk(node: Any, prefix: tuple[str, ...]) -> None:
+        path = prefix + tuple(str(part) for part in getattr(node, "absolute_path", ()) or ())
+        children = list(getattr(node, "context", None) or [])
+        if children:
+            for child in children:
+                walk(child, path[len(prefix):] if False else path)
+            return
+        leaves.append((path, str(getattr(node, "validator", "")), str(getattr(node, "message", ""))))
+
+    walk(error, ())
+    if not leaves:
+        leaves.append(((), str(getattr(error, "validator", "")), str(getattr(error, "message", ""))))
+    return leaves
+
+
+def _structural_outcomes(
+    spec: VirSpec, error: Any, *, first_index: int = -1
+) -> list[ConstraintOutcome]:
+    """Attribute a JSON-Schema failure to fields as synthetic constraint outcomes.
+
+    A structural failure used to surface as a report with an empty ``outcomes`` list,
+    so ``summary_line()`` read ``0 satisfied, 0 violated, 0 unevaluated`` and callers had
+    nothing to point at.  Each leaf error now becomes one outcome naming the field, the
+    keyword and the message; a missing required property is *unevaluated* (``None``)
+    rather than violated, so ``status`` stays ``INCOMPLETE`` where it should.
+    """
+
+    reverse = {alias: name for name, alias in spec.field_aliases.items()}
+    known = set(spec.field_order) | set(spec.id_to_name.values())
+    outcomes: list[ConstraintOutcome] = []
+    seen: set[tuple[str, str]] = set()
+    index = first_index
+    for path, keyword, message in _schema_error_leaves(error):
+        head = path[0] if path else ""
+        field = reverse.get(head, head)
+        if field and known and field not in known:
+            field = field if field in known else ""
+        location = "/".join(path) if path else "$"
+        key = (location, keyword)
+        if key in seen:
+            continue
+        seen.add(key)
+        detail = message.split("\n")[0] if message else keyword
+        text = f"{field or location}: {detail}" if field else f"{location}: {detail}"
+        satisfied = None if keyword == "required" else False
+        outcomes.append(
+            ConstraintOutcome(
+                index=index,
+                kind="require",
+                text=text,
+                satisfied=satisfied,
+                detail=detail,
+            )
+        )
+        index -= 1
+    if not outcomes:
+        outcomes.append(
+            ConstraintOutcome(
+                index=first_index,
+                kind="require",
+                text="schema validation failed",
+                satisfied=False,
+                detail=str(error).split("\n")[0],
+            )
+        )
+    return outcomes
 
 
 def _json_data(value):
@@ -451,10 +559,17 @@ def verify_values(
     """Verify an already-lowered mapping of field values against ``spec``."""
 
     data = dict(values)
-    structural_error = _validate_structure(spec, data)
-    if structural_error:
-        return VerificationReport(status=FAIL, model_error=structural_error, values=data,
-                                  spec_digest=_safe_digest(spec))
+    structural = _schema_error(spec, data, include_required=False)
+    if structural is not None:
+        outcomes = _structural_outcomes(spec, structural)
+        return VerificationReport(
+            status=FAIL,
+            outcomes=outcomes,
+            unsat_core=[o.index for o in outcomes if o.satisfied is False],
+            model_error=f"schema validation: {structural}",
+            values=data,
+            spec_digest=_safe_digest(spec),
+        )
     data = _canonical_fields(spec, data)
     derived: dict[str, Any] = {}
     unresolved: list[str] = []
@@ -462,14 +577,30 @@ def verify_values(
         data, unresolved, derived = fill_derived(spec, data, overwrite=False)
     # Restore aliases for the portable schema, then canonicalize again for VIR.
     aliased = {spec.field_aliases.get(k, k): v for k, v in data.items()}
-    full_error = _validate_structure_required(spec, aliased)
-    if full_error:
+    full_error = _schema_error(spec, aliased, include_required=True)
+    if full_error is not None:
         reverse = {alias: name for name, alias in spec.field_aliases.items()}
         missing_required = [reverse.get(k, k) for k in (spec.model_schema or {}).get("required", [])
                             if reverse.get(k, k) not in data]
-        return VerificationReport(status=INCOMPLETE if "is a required property" in full_error else FAIL,
-                                  model_error=full_error, values=data, derived=derived,
-                                  missing=missing_required, unresolved=unresolved, spec_digest=_safe_digest(spec))
+        outcomes = _structural_outcomes(spec, full_error)
+        # A missing property is *unevaluated* (the spec is fine, the instance is partial);
+        # anything else is a genuine violation.
+        status = (
+            INCOMPLETE
+            if (missing_required or any(o.satisfied is None for o in outcomes))
+            else FAIL
+        )
+        return VerificationReport(
+            status=status,
+            outcomes=outcomes,
+            unsat_core=[o.index for o in outcomes if o.satisfied is False],
+            model_error=f"schema validation: {full_error}",
+            values=data,
+            derived=derived,
+            missing=missing_required,
+            unresolved=unresolved,
+            spec_digest=_safe_digest(spec),
+        )
 
     env: dict[Any, Any] = {}
     missing: list[str] = []

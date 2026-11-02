@@ -1,4 +1,4 @@
-"""``veritas`` command line: check-spec, verify, verify-proof, inspect, synth.
+"""``veritas`` command line: check-spec, verify, verify-proof, inspect, synth, doctor.
 
 Every command is real: specs are imported and compiled, instances are verified, proof
 certificates are re-checked offline, traces are rendered to a standalone HTML report, and
@@ -291,6 +291,47 @@ tr.backtrack {{ background: rgba(244, 63, 94, .14); }}
 
 
 # ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Report the live engine. Diagnostics exit 0 unless ``--strict`` asks otherwise."""
+    import platform
+
+    from .. import doctor, native
+
+    report = doctor()
+    report["implementation"] = platform.python_implementation()
+    report["python_version"] = platform.python_version()
+    report["platform"] = platform.platform()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        engine = report["engine"]
+        accelerated = report["python"] == "accelerated"
+        engine_line = (
+            f"{engine.get('name')} {engine.get('version')} ({engine.get('abi', 'native')})"
+            if accelerated
+            else "reference python"
+        )
+        print(f"veritas {report['version']} on {report['implementation']} {report['python_version']}")
+        print(f"  engine    {engine_line}")
+        if engine.get("load_error"):
+            print(f"  reason    {engine['load_error']}")
+        wire = report["wire_version"]
+        print(f"  wire      {'v' + str(wire) if wire is not None else 'n/a'}")
+        print(f"  platform  {report['platform']}")
+        if not accelerated:
+            print("  note      the pure-Python engine is complete; the extension would only be faster.")
+        if native.disabled_by_env():
+            print(f"  note      {native.DISABLE_ENV} is set, which forces the reference path.")
+    if args.strict and report["python"] != "accelerated":
+        print("error: --strict requires the native extension", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # argument parsing
 # ---------------------------------------------------------------------------
 
@@ -321,6 +362,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_inspect)
+
+    p = sub.add_parser("doctor", help="report the engine, wire version and platform")
+    p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 1 when the pure-Python engine is in use (for deployment health checks)",
+    )
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("synth", help="infer a schema module from JSON examples")
     p.add_argument("--from-json")

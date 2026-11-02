@@ -9,8 +9,11 @@ spliced without sampling, CDCL-style conflict analysis backtracks, and the final
 is verified concretely before it is returned. Results can be shipped with a self-contained
 proof certificate.
 
-This repository contains the **working Python reference engine** and a Rust workspace
-whose crates are still scaffolding (see [Status and limits](#status-and-limits)).
+This repository contains the **working Python reference engine** and a **Rust engine that
+ports every layer of it**: `crates/veritas-core` is dependency-free, unit- and
+property-tested, and reached from Python through an optional `abi3` extension that is used
+only as an accelerator (see [Status and limits](#status-and-limits) and
+[`docs/NATIVE.md`](docs/NATIVE.md)).
 
 ---
 
@@ -114,6 +117,11 @@ python -m veritas inspect trace.json --out report.html
 # Infer a schema module from JSON examples, then compile the generated module.
 python -m veritas synth --from-json examples.json --out generated_schema.py
 python -m veritas check-spec generated_schema.py
+
+# Report the live engine: reference or accelerated, wire version, platform.
+python -m veritas doctor           # human-readable
+python -m veritas doctor --json    # for a bug report
+python -m veritas doctor --strict  # exit 1 unless the native extension is loaded
 ```
 
 `--from-doc` is deliberately explicit about requiring a model adapter rather than
@@ -126,11 +134,12 @@ pretending to infer from prose.
 | Layer | Modules | Responsibility |
 |---|---|---|
 | Authoring | `decorators.py`, `compiler/` | Compile Pydantic models + `require/derive/prefer/forall` into VIR; dependency graph; container analysis |
-| Pre-flight | `compiler/preflight.py`, `analysis.py`, `linear.py` | Interval contraction, AGDecode container feasibility, exact affine feasibility; contradictory specs fail before generation |
-| Tier 0 grammar | `json_pda.py`, `pda.py` | Deterministic JSON pushdown automaton, exact token masks over a vocabulary, canonical rendering |
+| Pre-flight | `compiler/preflight.py`, `analysis.py`, `linear.py` | Interval contraction, AGDecode container feasibility, exact affine feasibility, exact strict-bound refutation, checked string/pattern witnesses; contradictory specs fail before generation |
+| Tier 0 grammar | `json_pda.py`, `pda.py`, `pattern.py`, `textformats.py` | Deterministic JSON pushdown automaton, exact token masks over a vocabulary, canonical rendering, incremental `pattern`/length string masks, verified witnesses for JSON-Schema `format` strings |
 | Tier 1 numerics | `interval.py`, `linear.py`, `crane_mode.py` | Affine forms, HC4 contractor, residual containers, clause simplification |
 | Tier 2 search | `nano_solver.py`, `cdcl_jumpback.py` | Deterministic linear solver with unsat cores, CDCL conflict branches, tabu prefixes |
 | Acceleration | `zero_dof.py`, `token_healer.py` | Ready-field derivation, canonical JSON Jump-Forward splices, boundary healing |
+| Native engine | `crates/veritas-core` | Dependency-free Rust ports of every layer above: intervals, JSON automaton, tri-state evaluator, HC4 contractor, exact solver, CRANE, CDCL jumpback, 0-DoF splicing, token healing, SMT-LIB emission. Used as an accelerator; Python stays authoritative |
 | Decoding | `decode.py` | Session/engine orchestration, masks, splices, final verification, telemetry and trace |
 | Verification | `evaluate.py`, `instance.py` | Total concrete evaluator, tri-state logic, derived fill, reports, minimal cores |
 | Proofs | `proof/certificate.py` | Self-contained SMT-LIB2 + witness certificates, hashes, offline verification, tamper detection |
@@ -142,13 +151,40 @@ pretending to infer from prose.
 
 - **Tier 0** rejects any token that would make the JSON prefix unparsable, and allows EOS
   only when the document is complete. The mask is computed against the supplied vocabulary;
-  it is not a heuristic character check.
+  it is not a heuristic character check. String fields are masked by `minLength`/
+  `maxLength` *and* by their JSON-Schema `pattern`: `pattern.py` compiles the regex to a
+  Thompson NFA and reports exactly which characters keep the prefix extendable. Patterns
+  outside the maskable subset (inline flags, backreferences, lookaround, word boundaries)
+  are rejected loudly and fall back to length-only masking with an entry in
+  `telemetry["pattern_fallbacks"]`, so the final verifier — never the mask — has the last
+  word. Formatted strings (`datetime`, `date`, `time`, `timedelta`, `UUID`, `Decimal`,
+  `HttpUrl`, IP addresses, and `Field(json_schema_extra={"format": ...})`) are decoded from
+  a *verified* witness per format: every candidate is re-checked with the concrete format
+  checker, so `format: "date-time"` fields can be generated at all instead of failing as
+  unsupported types. Unknown formats fall back to ordinary string masking and are listed in
+  `telemetry["format_fallbacks"]`.
 - **Tier 1** contracts numeric domains and dynamic-container residual sums. Contradictions
-  restore the previous domain snapshot instead of poisoning the search.
+  restore the previous domain snapshot instead of poisoning the search. Contraction is
+  outward-rounded, so a feasible equality such as `a + b == 1` can never be reported empty
+  because of float error. Open (`gt`/`lt`) bounds are represented by the adjacent
+  representable value for reals and by the neighbouring integer for ints, and the excluded
+  endpoint is refused at the stop decision as well as in the contractor. Open bounds are
+  *also* enforced for container elements (`forall(lst, lambda v: 0 < v < 1)`).
+- **Numeric search** is a bounded depth-first walk over digits and `.`/`-`, ordered by model
+  logits and pruned by the reachable interval, with a deterministic interior fallback when
+  the budget runs out. A greedy literal that leads to a dead end is abandoned for a
+  feasible sibling instead of failing the whole attempt.
 - **Tier 2** only returns `UNSAT` when it can prove it; budget/timeout yields `UNKNOWN`.
 - **Final verification** evaluates every constraint on the concrete object. A generated
   result is returned only if the report is `PASS`; if decoding exhausts its budget, the
-  engine emits a canonical valid object rather than truncated JSON.
+  engine emits a canonical valid object rather than truncated JSON. Structural failures
+  (missing required field, wrong type, pattern mismatch) are reported as concrete
+  `outcomes` naming the offending field, so `VerificationError` says *what* to fix instead
+  of "0 satisfied, 0 violated, 0 unevaluated".
+- **Soft preferences** (`vt.prefer`) steer generation: after a `PASS`, violated soft bounds
+  are intersected into the declared domain and the attempt is repeated while the weighted
+  preference score improves. Preferences never override hard constraints, and the accepted
+  result is the best-scoring verified one (`telemetry["preference_score"]`).
 
 Equality tolerances are applied at final verification, while contractor cuts use exact
 bounds. This avoids the classic false-infeasibility bug where an epsilon-padded cut rejects
@@ -241,14 +277,34 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **159 tests passing** (compiler, preflight, instance verification, JSON PDA,
-token healing, decode engine, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end).
+Current status: **378 passed, 41 skipped** in the default install (compiler, preflight,
+instance verification, JSON PDA, token healing, decode engine, pattern masking, numeric
+search, structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end). The
+41 skips are the native/pure-Python parity corpus, the kill-switch tests that need a live
+engine, and the randomized differential sweep in `tests/test_native_backend.py`; with the
+extension built they run, so the whole suite is **419 passed, 0 skipped** *and* every other
+test then exercises the native masks and numeric prefixes.
+
+The Rust engine has its own 68 unit tests plus 12 property tests
+(`crates/veritas-core/tests/soundness.rs`) that refutes randomized constraints against a
+brute-force grid, re-checks every UNSAT core standalone and cross-checks the automaton against
+the prefix classifier. CI runs:
+
+```bash
+cargo test -p veritas-core --all-targets
+cargo clippy -p veritas-core --all-targets -- -D warnings
+cargo build --release -p veritas-py
+cargo build -p veritas-wasm --target wasm32-unknown-unknown
+```
 
 Useful focused suites:
 
 ```bash
 .venv/bin/python -m pytest tests/test_instance_verification.py -q
 .venv/bin/python -m pytest tests/test_decode_engine.py -q
+.venv/bin/python -m pytest tests/test_pattern.py tests/test_numeric_search.py -q
+.venv/bin/python -m pytest tests/test_text_formats.py -q
+.venv/bin/python -m pytest tests/test_decode_robustness.py -q
 .venv/bin/python -m pytest tests/test_proofs.py -q
 .venv/bin/python -m pytest tests/test_bridges.py tests/test_cli_preflight.py -q
 ```
@@ -257,9 +313,25 @@ Useful focused suites:
 
 ## Status and limits
 
-- The **Python engine is the complete, tested product surface** in this repository.
-- The `crates/` Rust workspace is still scaffolding. No Rust toolchain (`cargo`/`rustc`) is
-  available in this environment, so nothing in `crates/` was compiled or claimed as working.
+- The **Python engine is the complete, tested product surface** in this repository; the Rust
+  engine is a tested accelerator with the same semantics, not a replacement API.
+- `crates/veritas-core` is dependency-free (no crates, no C toolchain) and its 68 unit tests,
+  12 property tests, `clippy -D warnings`, the pyo3 build and the wasm build all run in CI.
+  Using Veritas needs no Rust toolchain; every native claim here is backed by a CI run rather
+  than a developer's local build.
+- On a GitHub runner the accelerator is **17.9x** faster at `TokenMasker.valid_mask` over a
+  605-token vocabulary and **1.5x** faster at `Interval.from_numeric_prefix` (4.07 ms → 0.23 ms
+  and 5.7 µs → 3.9 µs per call); `benchmarks/native_speedup.py` reproduces the comparison and
+  the numbers, caveats included, are in `docs/BENCHMARKS.md`; the accelerator's contract
+  (build, wire format, fallback and panic behaviour, what is and is not accelerated) is
+  `docs/NATIVE.md`. The first is a per-token loop, the
+  second is a handful of float operations dominated by the call boundary.
+- The native path is preferred only when `veritas.native.available()` is true, and every
+  wrapper falls back to pure Python; `tests/test_native_backend.py` pins the parity, so a
+  native regression costs speed, not soundness. `veritas.native.info()` reports the loaded
+  engine and why it is missing otherwise. Set **`VERITAS_NO_NATIVE=1`** to force the reference
+  path (checked per call, no reinstall), and run `python benchmarks/native_speedup.py` to see
+  what the accelerator actually buys on your machine instead of trusting a headline number.
 - The grammar tier recognizes **JSON**, not arbitrary context-free grammars. Schema-guided
   masking supports a documented JSON Schema subset (objects/arrays/scalars, `anyOf`/`oneOf`,
   local `$ref`, required/arity/range/enum); unsupported keywords fail loudly. Token masking
@@ -269,6 +341,19 @@ Useful focused suites:
   tolerance is intended. `derive` keeps a numeric equality tolerance by default.
 - The certificate verifier is self-contained. The optional Z3 oracle is exercised when
   `z3-solver` is installed; SymPy/CAS paths remain optional.
+- `pattern` masking covers a documented regex subset. Constructs that would need semantic
+  case folding or unbounded lookaround (`(?i)`, backreferences, word boundaries, lookaround)
+  are rejected and generation degrades to length-only masking with an explicit telemetry
+  entry; the verifier then rejects any mismatch instead of silently accepting it. Only the
+  first `pattern` on a field drives the mask when several are declared.
+- Formats are generated from a witness table, not sampled character by character. A
+  formatted field whose declared `minLength`/`maxLength` window excludes every candidate
+  (or whose `pattern` contradicts the canonical witness) is reported in
+  `format_fallbacks` and falls back to ordinary masking; the concrete validator decides.
+- Numeric literals are bounded by `DecodeConfig.max_integer_digits`,
+  `max_fraction_digits` and `max_number_nodes`. A schema whose only solutions need more
+  digits than that is reported as a dead end (with the culprit field), not silently
+  rounded into a violation.
 - GPU/runtime bridges are adapter-tested with fakes. They are not integration-tested against
   live HF/vLLM/SGLang/llama.cpp servers, and vendor APIs may need host-specific wiring.
 - `--from-doc` requires a model adapter and intentionally fails loudly instead of inventing a
