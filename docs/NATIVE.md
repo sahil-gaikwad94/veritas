@@ -84,11 +84,12 @@ the accelerator rather than guessing:
 
 Four independent layers, all in CI:
 
-1. **Rust unit tests** — 67 examples over the modules, run by `cargo test -p veritas-core`.
-2. **Rust properties** — 9 tests in `crates/veritas-core/tests/soundness.rs`: contractor
+1. **Rust unit tests** — 68 examples over the modules, run by `cargo test -p veritas-core`.
+2. **Rust properties** — 10 tests in `crates/veritas-core/tests/soundness.rs`: contractor
    refutations never contain a satisfying point, UNSAT cores are re-solved standalone, the
    numeric prefix mask keeps every legal completion, the automaton and the parser agree on
-   random strings, healing never reports an unverified splice, rendering and parsing are inverse.
+   random strings, healing never reports an unverified splice, rendering and parsing are
+   inverse, and a domain report round-trips through the wire bit for bit.
 3. **Hand-picked parity corpus** — 38 cases in `tests/test_native_backend.py` comparing the
    native answers with the pure-Python ones.
 4. **Randomized differential sweeps** (same file, `requires_native`): 600 prefix verdicts over

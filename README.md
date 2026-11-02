@@ -269,15 +269,15 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **372 passed, 41 skipped** in the default install (compiler, preflight,
+Current status: **373 passed, 41 skipped** in the default install (compiler, preflight,
 instance verification, JSON PDA, token healing, decode engine, pattern masking, numeric
 search, structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end). The
 41 skips are the native/pure-Python parity corpus, the kill-switch tests that need a live
 engine, and the randomized differential sweep in `tests/test_native_backend.py`; with the
-extension built they run, so the whole suite is **413 passed, 0 skipped** *and* every other
+extension built they run, so the whole suite is **414 passed, 0 skipped** *and* every other
 test then exercises the native masks and numeric prefixes.
 
-The Rust engine has its own 67 unit tests plus 9 property tests
+The Rust engine has its own 68 unit tests plus 10 property tests
 (`crates/veritas-core/tests/soundness.rs`) that refutes randomized constraints against a
 brute-force grid, re-checks every UNSAT core standalone and cross-checks the automaton against
 the prefix classifier. CI runs:
@@ -307,7 +307,7 @@ Useful focused suites:
 
 - The **Python engine is the complete, tested product surface** in this repository; the Rust
   engine is a tested accelerator with the same semantics, not a replacement API.
-- `crates/veritas-core` is dependency-free (no crates, no C toolchain) and its 67 unit tests,
+- `crates/veritas-core` is dependency-free (no crates, no C toolchain) and its 68 unit tests,
   `clippy -D warnings`, the pyo3 build and the wasm build all run in CI. The session sandbox
   has no Rust toolchain, so those results come from CI rather than from a local run.
 - On a GitHub runner the accelerator is **17.9x** faster at `TokenMasker.valid_mask` over a

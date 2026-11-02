@@ -82,7 +82,7 @@ pass:
 * Packaging is pure-Python setuptools with a `py.typed` marker; wheel and editable installs
   are smoke-tested. CI runs ruff, pytest, and wheel build on Python 3.11/3.12.
 
-Validation: `ruff check python tests` clean; `pytest tests/ -q` → **372 passed, 41 skipped** without the extension and **413 passed, 0 skipped** with it; wheel build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
+Validation: `ruff check python tests` clean; `pytest tests/ -q` → **373 passed, 41 skipped** without the extension and **414 passed, 0 skipped** with it; wheel build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
 
 ### Remaining known limits
 
