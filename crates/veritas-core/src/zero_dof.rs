@@ -133,7 +133,7 @@ impl ZeroDofEngine {
 
     /// Evaluate every currently-ready rule once; returns the newly computed fields in the
     /// order the rules became ready.
-    pub fn compute_ready(&self, values: &Values) -> Vec<(String, f64)> {
+    pub fn compute_ready(&mut self, values: &Values) -> Vec<(String, f64)> {
         let mut computed: Vec<(String, f64)> = Vec::new();
         let mut result = values.clone();
         for _ in 0..100 {
@@ -163,6 +163,7 @@ impl ZeroDofEngine {
                 break;
             }
         }
+        self.jump_forward_fields = computed.iter().map(|(key, _)| key.clone()).collect();
         computed
     }
 
@@ -177,7 +178,6 @@ impl ZeroDofEngine {
         precision: Option<&BTreeMap<String, u32>>,
     ) -> (String, Vec<(String, f64)>) {
         let computed = self.compute_ready(values);
-        self.jump_forward_fields = computed.iter().map(|(key, _)| key.clone()).collect();
         if computed.is_empty() {
             self.last_splice = String::new();
             return (String::new(), computed);
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn ready_rules_cascade_in_topological_order() {
-        let engine = ZeroDofEngine::new(vec![
+        let mut engine = ZeroDofEngine::new(vec![
             rule(
                 "mean",
                 &["a", "b"],

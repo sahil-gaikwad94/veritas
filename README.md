@@ -131,6 +131,7 @@ pretending to infer from prose.
 | Tier 1 numerics | `interval.py`, `linear.py`, `crane_mode.py` | Affine forms, HC4 contractor, residual containers, clause simplification |
 | Tier 2 search | `nano_solver.py`, `cdcl_jumpback.py` | Deterministic linear solver with unsat cores, CDCL conflict branches, tabu prefixes |
 | Acceleration | `zero_dof.py`, `token_healer.py` | Ready-field derivation, canonical JSON Jump-Forward splices, boundary healing |
+| Native engine | `crates/veritas-core` | Dependency-free Rust ports of every layer above: intervals, JSON automaton, tri-state evaluator, HC4 contractor, exact solver, CRANE, CDCL jumpback, 0-DoF splicing, token healing, SMT-LIB emission. Used as an accelerator; Python stays authoritative |
 | Decoding | `decode.py` | Session/engine orchestration, masks, splices, final verification, telemetry and trace |
 | Verification | `evaluate.py`, `instance.py` | Total concrete evaluator, tri-state logic, derived fill, reports, minimal cores |
 | Proofs | `proof/certificate.py` | Self-contained SMT-LIB2 + witness certificates, hashes, offline verification, tamper detection |
@@ -268,9 +269,20 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **333 tests passing** (compiler, preflight, instance verification, JSON PDA,
-token healing, decode engine, pattern masking, numeric search, structural diagnostics,
-proofs, cartridges, bridges, LTLf/RL and CLI end-to-end).
+Current status: **333 tests passing** in the default install (compiler, preflight, instance
+verification, JSON PDA, token healing, decode engine, pattern masking, numeric search,
+structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end). With the
+native extension built the suite is **366 passed, 0 skipped**: the extra 33 include the
+native/pure-Python parity corpus in `tests/test_native_backend.py`.
+
+The Rust engine has its own 67 unit tests, run by CI:
+
+```bash
+cargo test -p veritas-core --all-targets
+cargo clippy -p veritas-core --all-targets -- -D warnings
+cargo build --release -p veritas-py
+cargo build -p veritas-wasm --target wasm32-unknown-unknown
+```
 
 Useful focused suites:
 
@@ -288,9 +300,15 @@ Useful focused suites:
 
 ## Status and limits
 
-- The **Python engine is the complete, tested product surface** in this repository.
-- The `crates/` Rust workspace is still scaffolding. No Rust toolchain (`cargo`/`rustc`) is
-  available in this environment, so nothing in `crates/` was compiled or claimed as working.
+- The **Python engine is the complete, tested product surface** in this repository; the Rust
+  engine is a tested accelerator with the same semantics, not a replacement API.
+- `crates/veritas-core` is dependency-free (no crates, no C toolchain) and its 67 unit tests,
+  `clippy -D warnings`, the pyo3 build and the wasm build all run in CI. The session sandbox
+  has no Rust toolchain, so those results come from CI rather than from a local run.
+- The native path is preferred only when `veritas.native.available()` is true, and every
+  wrapper falls back to pure Python; `tests/test_native_backend.py` pins the parity, so a
+  native regression costs speed, not soundness. `veritas.native.info()` reports the loaded
+  engine and why it is missing otherwise.
 - The grammar tier recognizes **JSON**, not arbitrary context-free grammars. Schema-guided
   masking supports a documented JSON Schema subset (objects/arrays/scalars, `anyOf`/`oneOf`,
   local `$ref`, required/arity/range/enum); unsupported keywords fail loudly. Token masking
