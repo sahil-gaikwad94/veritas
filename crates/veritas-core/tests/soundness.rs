@@ -10,7 +10,7 @@
 //! because `veritas-core` has no dependencies at all: reproducible seeds are worth more than a
 //! shrinking heuristics, and a failure prints the exact seed to replay.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use veritas_core::contractor::{Constraint, Contractor};
 use veritas_core::expr::{CmpOp, Env, Expr};
@@ -18,6 +18,7 @@ use veritas_core::interval::Interval;
 use veritas_core::json::{self, Json, Prefix};
 use veritas_core::num::Rational;
 use veritas_core::pda::Pda;
+use veritas_core::smt_bridge::SmtBridge;
 use veritas_core::solver::{self, Linear, Outcome};
 use veritas_core::token_healer::{ByteTokenizer, TokenHealer, Tokenizer};
 use veritas_core::wire;
@@ -727,4 +728,103 @@ fn jump_forward_text_is_valid_json_and_states_the_values() {
         }
     }
     assert!(spliced > 150, "the generator must produce splices, got {spliced}");
+}
+
+/// An SMT-LIB script is an artifact a certificate can bind to, so a malformed one makes the
+/// artifact unverifiable. Emit random systems and check the structure rather than one example:
+/// balanced parentheses, every variable declared exactly once, one named assertion per
+/// supported constraint, and the two commands exactly once at the end.
+#[test]
+fn every_emitted_script_is_well_formed() {
+    let seed = 0xABCD_1234_FFFF_0001u64;
+    let mut rng = Rng::new(seed);
+    let ops = [
+        CmpOp::Eq,
+        CmpOp::Le,
+        CmpOp::Lt,
+        CmpOp::Ge,
+        CmpOp::Gt,
+        CmpOp::Ne,
+        CmpOp::In,
+        CmpOp::NotIn,
+    ];
+    let mut skipped = 0usize;
+
+    for _ in 0..200 {
+        let mut bridge = SmtBridge::new(None);
+        let mut variables: BTreeSet<u32> = BTreeSet::new();
+        let mut expected_assertions = 0usize;
+        for index in 0..(1 + rng.below(5)) {
+            let mut coeffs: Vec<(u32, f64)> = Vec::new();
+            for var in 0..(1 + rng.below(3)) as u32 {
+                let coeff = rng.pick(&COEFFICIENTS);
+                if coeff != 0.0 {
+                    coeffs.push((var, coeff));
+                }
+            }
+            if coeffs.is_empty() {
+                continue;
+            }
+            // Variables are declared before the operator is checked, so the model records
+            // them even when the assertion itself is skipped.
+            variables.extend(coeffs.iter().map(|(var, _)| *var));
+            let constraint = Linear {
+                coeffs,
+                rhs: rng.range(-2.0, 2.0),
+                op: rng.pick(&ops),
+            };
+            bridge.assert_and_track(&constraint, &format!("a{index}"));
+            if matches!(constraint.op, CmpOp::In | CmpOp::NotIn) {
+                skipped += 1;
+            } else {
+                expected_assertions += 1;
+            }
+        }
+
+        let script = bridge.script();
+        assert_eq!(bridge.assertion_count(), expected_assertions, "seed {seed}");
+
+        let mut depth = 0i32;
+        for ch in script.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    assert!(depth >= 0, "seed {seed}: a close parenthesis comes first\n{script}");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0, "seed {seed}: unbalanced script\n{script}");
+
+        assert_eq!(
+            script.matches("(declare-fun ").count(),
+            variables.len(),
+            "seed {seed}: exactly one declaration per variable\n{script}"
+        );
+        for var in &variables {
+            let declaration = format!("(declare-fun x{} () Real)\n", var);
+            assert_eq!(
+                script.matches(&declaration).count(),
+                1,
+                "seed {seed}: x{var} is not declared once\n{script}"
+            );
+        }
+        assert_eq!(
+            script.matches(":named ").count(),
+            expected_assertions,
+            "seed {seed}: one name per assertion\n{script}"
+        );
+        assert_eq!(script.matches("(check-sat)").count(), 1, "seed {seed}\n{script}");
+        assert_eq!(
+            script.matches("(get-unsat-core)").count(),
+            1,
+            "seed {seed}\n{script}"
+        );
+        assert!(
+            script.ends_with("(check-sat)\n(get-unsat-core)\n"),
+            "seed {seed}: the commands must close the script\n{script}"
+        );
+    }
+    assert!(skipped > 5, "the generator must exercise the skipped operators");
 }

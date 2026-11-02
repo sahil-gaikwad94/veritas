@@ -285,7 +285,7 @@ engine, and the randomized differential sweep in `tests/test_native_backend.py`;
 extension built they run, so the whole suite is **419 passed, 0 skipped** *and* every other
 test then exercises the native masks and numeric prefixes.
 
-The Rust engine has its own 68 unit tests plus 11 property tests
+The Rust engine has its own 68 unit tests plus 12 property tests
 (`crates/veritas-core/tests/soundness.rs`) that refutes randomized constraints against a
 brute-force grid, re-checks every UNSAT core standalone and cross-checks the automaton against
 the prefix classifier. CI runs:
@@ -316,7 +316,7 @@ Useful focused suites:
 - The **Python engine is the complete, tested product surface** in this repository; the Rust
   engine is a tested accelerator with the same semantics, not a replacement API.
 - `crates/veritas-core` is dependency-free (no crates, no C toolchain) and its 68 unit tests,
-  11 property tests, `clippy -D warnings`, the pyo3 build and the wasm build all run in CI.
+  12 property tests, `clippy -D warnings`, the pyo3 build and the wasm build all run in CI.
   Using Veritas needs no Rust toolchain; every native claim here is backed by a CI run rather
   than a developer's local build.
 - On a GitHub runner the accelerator is **17.9x** faster at `TokenMasker.valid_mask` over a
