@@ -314,12 +314,13 @@ mod tests {
 
     #[test]
     fn refutes_infeasible_systems() {
-        let mut contractor = Contractor::new(boxed(&[(0, 0.0, 1.0)]));
+        let mut contractor = Contractor::new(boxed(&[(0, 0.8, 1.0)]));
         contractor.push(Constraint::Linear {
             coeffs: vec![(0, 3.0)],
             rhs: 2.0,
             op: CmpOp::Eq,
         });
+        // 3x == 2 needs x = 2/3, which is outside [0.8, 1.0].
         assert!(!contractor.propagate(8));
 
         let mut quadratic = Contractor::new(boxed(&[(0, 2.0, 3.0)]));
@@ -358,16 +359,21 @@ mod tests {
         assert!(contractor.domain(0).contains(1.0));
         assert!(contractor.domain(0).hi <= 2.0);
 
-        // b may be zero: dividing by it must not narrow a.
-        let mut unsafe_box = Contractor::new(boxed(&[(0, 1.0, 2.0), (1, -1.0, 1.0)]));
-        unsafe_box.push(Constraint::Product {
+        // While b still spans zero, dividing by it must widen rather than narrow; once b has
+        // been narrowed to [0.75, 1] the a-domain follows soundly (a = 1.5 / b).
+        let mut boxed_product = Contractor::new(boxed(&[(0, 1.0, 2.0), (1, -1.0, 1.0)]));
+        boxed_product.push(Constraint::Product {
             a: 0,
             b: 1,
             rhs: 1.5,
             op: CmpOp::Eq,
         });
-        assert!(unsafe_box.propagate(4));
-        assert_eq!(unsafe_box.domain(0), Interval::new(1.0, 2.0));
+        assert!(boxed_product.propagate(4));
+        let a = boxed_product.domain(0);
+        let b = boxed_product.domain(1);
+        assert!(a.contains(1.5) && a.contains(2.0), "a = {:?}", a);
+        assert!(a.lo >= 1.5 - 1e-9, "a must stay inside 1.5/b for b in [0.75, 1]");
+        assert!(b.contains(0.75) && b.hi <= 1.0 + 1e-9, "b = {:?}", b);
     }
 
     #[test]

@@ -480,9 +480,10 @@ mod tests {
         let pda = feed("{\"a\": [1]}");
         assert_eq!(pda.last_event(), Some(Event::Value));
         assert!(pda.events().contains(&Event::Key));
+        // One close for the array, one for the object.
         assert_eq!(
             pda.events().iter().filter(|event| **event == Event::Close).count(),
-            1
+            2
         );
         assert_eq!(pda.depth(), 0);
     }
@@ -550,9 +551,10 @@ mod tests {
         .collect();
         let empty = Pda::new();
         let allowed = empty.mask(&vocabulary, Some("<stop>"));
-        assert!(allowed.contains(&0));
-        assert!(!allowed.contains(&6));
-        assert!(!allowed.contains(&7));
+        assert!(allowed.contains(&0)); // a key opens the document
+        assert!(allowed.contains(&6)); // so does a literal: null is a document
+        assert!(!allowed.contains(&5)); // a bare ] cannot start anything
+        assert!(!allowed.contains(&7)); // and the document is not finished yet
 
         let open = feed("{\"a\": ");
         let allowed = open.mask(&vocabulary, Some("<stop>"));
@@ -572,9 +574,11 @@ mod tests {
         for text in ["", "-", "01", "1.", ".5", "1e", "1e+", "+1", "1x", "00"] {
             assert!(!number_prefix_ok(text, true), "{} is not a number", text);
         }
-        for text in ["", "-", "1.", "1e", "1e+", "0."] {
+        for text in ["-", "1.", "1e", "1e+", "0."] {
             assert!(number_prefix_ok(text, false), "{} is a legal prefix", text);
         }
+        // An empty string is a prefix of *a value*, not of a number.
+        assert!(!number_prefix_ok("", false));
     }
 
     #[test]
