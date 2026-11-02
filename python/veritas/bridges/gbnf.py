@@ -77,7 +77,7 @@ class GBNFGenerator:
         """Generate rules for the spec's fields."""
         # First, create the base object and array rules so they can be referenced
         self.rules["object"] = '{{ ws (member (ws "," ws member)*)? ws }}'
-        self.rules["array"] = f'[ ws (value (ws "," ws value)*)? ws ]'
+        self.rules["array"] = '[ ws (value (ws "," ws value)*)? ws ]'
         self.rules["member"] = ""  # Will be populated below
 
         # Build the main object rule for the model
