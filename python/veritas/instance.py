@@ -577,8 +577,13 @@ def verify_values(
         missing_required = [reverse.get(k, k) for k in (spec.model_schema or {}).get("required", [])
                             if reverse.get(k, k) not in data]
         outcomes = _structural_outcomes(spec, full_error)
-        kind = next((o for o in outcomes if "required" in o.detail), None)
-        status = INCOMPLETE if (missing_required or kind is not None) else FAIL
+        # A missing property is *unevaluated* (the spec is fine, the instance is partial);
+        # anything else is a genuine violation.
+        status = (
+            INCOMPLETE
+            if (missing_required or any(o.satisfied is None for o in outcomes))
+            else FAIL
+        )
         return VerificationReport(
             status=status,
             outcomes=outcomes,
