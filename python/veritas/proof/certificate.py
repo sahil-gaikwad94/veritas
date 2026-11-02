@@ -44,9 +44,9 @@ from ..serde import (
 
 # Optional cryptography dependency for signing
 try:
+    from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
-    from cryptography.exceptions import InvalidSignature
     _CRYPTO_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional dependency
     _CRYPTO_AVAILABLE = False
