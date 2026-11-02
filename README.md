@@ -127,7 +127,7 @@ pretending to infer from prose.
 |---|---|---|
 | Authoring | `decorators.py`, `compiler/` | Compile Pydantic models + `require/derive/prefer/forall` into VIR; dependency graph; container analysis |
 | Pre-flight | `compiler/preflight.py`, `analysis.py`, `linear.py` | Interval contraction, AGDecode container feasibility, exact affine feasibility, exact strict-bound refutation, checked string/pattern witnesses; contradictory specs fail before generation |
-| Tier 0 grammar | `json_pda.py`, `pda.py`, `pattern.py` | Deterministic JSON pushdown automaton, exact token masks over a vocabulary, canonical rendering, incremental `pattern`/length string masks |
+| Tier 0 grammar | `json_pda.py`, `pda.py`, `pattern.py`, `textformats.py` | Deterministic JSON pushdown automaton, exact token masks over a vocabulary, canonical rendering, incremental `pattern`/length string masks, verified witnesses for JSON-Schema `format` strings |
 | Tier 1 numerics | `interval.py`, `linear.py`, `crane_mode.py` | Affine forms, HC4 contractor, residual containers, clause simplification |
 | Tier 2 search | `nano_solver.py`, `cdcl_jumpback.py` | Deterministic linear solver with unsat cores, CDCL conflict branches, tabu prefixes |
 | Acceleration | `zero_dof.py`, `token_healer.py` | Ready-field derivation, canonical JSON Jump-Forward splices, boundary healing |
@@ -148,7 +148,12 @@ pretending to infer from prose.
   outside the maskable subset (inline flags, backreferences, lookaround, word boundaries)
   are rejected loudly and fall back to length-only masking with an entry in
   `telemetry["pattern_fallbacks"]`, so the final verifier — never the mask — has the last
-  word.
+  word. Formatted strings (`datetime`, `date`, `time`, `timedelta`, `UUID`, `Decimal`,
+  `HttpUrl`, IP addresses, and `Field(json_schema_extra={"format": ...})`) are decoded from
+  a *verified* witness per format: every candidate is re-checked with the concrete format
+  checker, so `format: "date-time"` fields can be generated at all instead of failing as
+  unsupported types. Unknown formats fall back to ordinary string masking and are listed in
+  `telemetry["format_fallbacks"]`.
 - **Tier 1** contracts numeric domains and dynamic-container residual sums. Contradictions
   restore the previous domain snapshot instead of poisoning the search. Contraction is
   outward-rounded, so a feasible equality such as `a + b == 1` can never be reported empty
@@ -263,7 +268,7 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **303 tests passing** (compiler, preflight, instance verification, JSON PDA,
+Current status: **333 tests passing** (compiler, preflight, instance verification, JSON PDA,
 token healing, decode engine, pattern masking, numeric search, structural diagnostics,
 proofs, cartridges, bridges, LTLf/RL and CLI end-to-end).
 
@@ -273,6 +278,7 @@ Useful focused suites:
 .venv/bin/python -m pytest tests/test_instance_verification.py -q
 .venv/bin/python -m pytest tests/test_decode_engine.py -q
 .venv/bin/python -m pytest tests/test_pattern.py tests/test_numeric_search.py -q
+.venv/bin/python -m pytest tests/test_text_formats.py -q
 .venv/bin/python -m pytest tests/test_decode_robustness.py -q
 .venv/bin/python -m pytest tests/test_proofs.py -q
 .venv/bin/python -m pytest tests/test_bridges.py tests/test_cli_preflight.py -q
@@ -299,6 +305,10 @@ Useful focused suites:
   are rejected and generation degrades to length-only masking with an explicit telemetry
   entry; the verifier then rejects any mismatch instead of silently accepting it. Only the
   first `pattern` on a field drives the mask when several are declared.
+- Formats are generated from a witness table, not sampled character by character. A
+  formatted field whose declared `minLength`/`maxLength` window excludes every candidate
+  (or whose `pattern` contradicts the canonical witness) is reported in
+  `format_fallbacks` and falls back to ordinary masking; the concrete validator decides.
 - Numeric literals are bounded by `DecodeConfig.max_integer_digits`,
   `max_fraction_digits` and `max_number_nodes`. A schema whose only solutions need more
   digits than that is reported as a dead end (with the culprit field), not silently

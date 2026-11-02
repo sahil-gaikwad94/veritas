@@ -446,11 +446,17 @@ def _schema_error(spec: VirSpec, data: Mapping[str, Any], *, include_required: b
     schema = copy.deepcopy(spec.model_schema)
     if not include_required:
         schema.pop("required", None)
+    from jsonschema.exceptions import ValidationError
+
     try:
-        Draft202012Validator(schema, format_checker=FormatChecker()).validate(
-            _json_data(payload)
-        )
-    except Exception as exc:  # ValidationError, or a schema/format error
+        payload_json = _json_data(payload)
+    except (TypeError, ValueError) as exc:
+        # The instance holds a value that has no JSON form.  That is an *interpretation*
+        # failure, not a schema violation, and must not be reported as a FAIL verdict.
+        raise InstanceFormatError(f"cannot interpret instance as JSON: {exc}") from exc
+    try:
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(payload_json)
+    except ValidationError as exc:
         return exc
     return None
 

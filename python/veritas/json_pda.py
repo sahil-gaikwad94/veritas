@@ -396,7 +396,87 @@ def json_value(value, precision=None):
         return "{" + ", ".join(f"{json.dumps(k, ensure_ascii=False)}: {json_value(v, precision)}" for k, v in value.items()) + "}"
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(json_value(v, precision) for v in value) + "]"
+    rendered = _scalar_json(value)
+    if rendered is not None:
+        return rendered
     raise TypeError(f"cannot serialize {type(value).__name__} as JSON")
+
+
+def _scalar_json(value):
+    """JSON rendering for the scalar types Pydantic models actually produce.
+
+    ``verify_values`` and ``verify_instance`` compare *typed* values (a model field may be
+    a ``datetime``, ``UUID``, ``Decimal`` or IP address), while JSON Schema validation needs
+    their JSON form.  Rendering them here keeps one canonical spelling for both the decoder
+    and the verifier; unfamiliar objects still fail loudly.
+    """
+
+    from datetime import date, datetime, time, timedelta
+    from decimal import Decimal
+    from enum import Enum
+    from pathlib import PurePath
+    from uuid import UUID
+
+    if isinstance(value, Decimal):
+        if value.is_finite():
+            return json_number(float(value))
+        return json.dumps(str(value))
+    if isinstance(value, Enum):
+        return json_value(value.value)
+    if isinstance(value, datetime):
+        text = value.isoformat()
+        return json.dumps(text[:-6] + "Z" if text.endswith("+00:00") else text)
+    if isinstance(value, (date, time)):
+        return json.dumps(value.isoformat())
+    if isinstance(value, timedelta):
+        return json.dumps(_iso_duration(value))
+    if isinstance(value, (UUID, PurePath)):
+        return json.dumps(str(value))
+    # ``ipaddress`` objects are not part of a small stable base class; duck-type them.
+    module = type(value).__module__
+    if module == "ipaddress":
+        return json.dumps(str(value))
+    # Pydantic's ``Url``/``SecretStr`` wrappers: JSON sees their string payload.
+    if hasattr(value, "get_secret_value"):
+        secret = value.get_secret_value()
+        if isinstance(secret, (str, int, float, bytes)):
+            return json_value(secret.decode() if isinstance(secret, bytes) else secret)
+    if module.startswith("pydantic") and str(type(value).__name__) in {
+        "Url",
+        "MultiHostUrl",
+        "AnyUrl",
+        "HttpUrl",
+        "HttpsUrl",
+        "AnyHttpUrl",
+        "FileUrl",
+        "PostgresDsn",
+        "RedisDsn",
+        "WebsocketUrl",
+    }:
+        return json.dumps(str(value))
+    return None
+
+
+def _iso_duration(delta):
+    """ISO-8601 duration, matching Pydantic's JSON spelling for ``timedelta``."""
+
+    total = delta.total_seconds()
+    sign = "-" if total < 0 else ""
+    total = abs(total)
+    days, remainder = divmod(total, 86400.0)
+    hours, remainder = divmod(remainder, 3600.0)
+    minutes, seconds = divmod(remainder, 60.0)
+    body = "T"
+    if days:
+        body = f"{int(days)}D" + body
+    if seconds or not (days or hours or minutes):
+        body += f"{seconds:g}S"
+    else:
+        if hours:
+            body += f"{int(hours)}H"
+        if minutes:
+            body += f"{int(minutes)}M"
+    return f"{sign}P{body}"
 
 
 def render_object(values, field_order=None, precision=None):

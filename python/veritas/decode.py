@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import textformats
 from .cdcl_jumpback import CdclJumpbackEngine, ClauseCheckpoint
 from .compiler.vir import ContainerInfo, VirSpec, VirType
 from .crane_mode import CraneModeController
@@ -127,6 +128,7 @@ class DecodeTelemetry:
     solver_checks: int = 0
     contractor_prunes: int = 0
     string_mask_prunes: int = 0
+    format_witnesses: int = 0
     number_expansions: int = 0
     jump_forward_fields: int = 0
     jump_forward_chars: int = 0
@@ -141,6 +143,7 @@ class DecodeTelemetry:
     backtrack_fields: list[str] = field(default_factory=list)
     domain_cuts: list[dict[str, Any]] = field(default_factory=list)
     pattern_fallbacks: list[str] = field(default_factory=list)
+    format_fallbacks: list[str] = field(default_factory=list)
     elapsed_ms: float = 0.0
     final_status: str = ""
     spec_digest: str = ""
@@ -737,6 +740,32 @@ class VeritasSession:
                 f"max_length={declared_max or self.config.max_string_length})",
             )
         constraint = self._pattern_for(name, vtype)
+        # Formatted strings (``date-time``, ``uuid``, ``email``, ...) are validated by the
+        # concrete schema checker, so sampling characters cannot work.  Emit a witness for
+        # the format instead -- deterministically, in zero sampled tokens -- and let the
+        # verifier confirm it.  Anything unsupported degrades to length/pattern masking
+        # with an explicit telemetry entry.
+        fmt = getattr(vtype, "text_format", None)
+        if fmt:
+            candidate = textformats.witness(fmt, min_len=min_len, max_len=limit)
+            if candidate is not None and (constraint is None or constraint.satisfied(candidate)):
+                self.telemetry.format_witnesses += 1
+                self._record(
+                    StepTrace,
+                    name,
+                    candidate,
+                    kind="format",
+                    note=f"format {fmt!r} witness",
+                )
+                return candidate
+            reason = (
+                "witness violates the declared pattern"
+                if candidate is not None
+                else f"no witness inside length window for format {fmt!r}"
+            )
+            entry = f"{name}: {reason}"
+            if entry not in self.telemetry.format_fallbacks:
+                self.telemetry.format_fallbacks.append(entry)
         alphabet = self._string_alphabet()
         chars: list[str] = []
         while True:
@@ -759,12 +788,17 @@ class VeritasSession:
                     f"string prefix {prefix!r} has no admissible continuation "
                     f"(min_length={min_len}, pattern={getattr(vtype, 'pattern', None)!r})",
                 )
-            choice = self._pick(name, model, self.text, actions, candidates=len(alphabet) + 1)
+            choice = self._pick(
+                name, model, self.text + prefix, actions, candidates=len(alphabet) + 1
+            )
             if choice == _STOP:
                 return prefix
             chars.append(choice)
-            self.text += choice
             self._record(StepTrace, name, choice)
+        # The *caller* appends ``json_value(value)`` once the literal is complete.  Writing
+        # the raw characters into the document here as well duplicated every string field
+        # (``"name": 99"99"``), which made the JSON PDA reject the attempt and silently
+        # fall back to canonical rendering.  Keep the sampled prefix local instead.
 
     def _exclusive_for(self, name: str) -> tuple[bool, bool]:
         """Open-bound flags that still matter after integer promotion."""

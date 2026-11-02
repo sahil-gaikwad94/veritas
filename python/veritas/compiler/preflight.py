@@ -40,6 +40,13 @@ def _string_witness(vtype: Any) -> str:
     min_len = max(0, int(getattr(vtype, "min_len", 0) or 0))
     max_len = getattr(vtype, "max_len", None)
     ceiling = int(max_len) if max_len else max(min_len, 64)
+    fmt = getattr(vtype, "text_format", None)
+    if fmt:
+        from ..textformats import witness as format_witness
+
+        found = format_witness(fmt, min_len=min_len, max_len=ceiling)
+        if found is not None:
+            return found
     if pattern:
         from ..pattern import PatternConstraint, UnsupportedPattern
 

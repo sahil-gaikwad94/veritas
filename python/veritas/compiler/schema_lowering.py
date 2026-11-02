@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 import enum
+import ipaddress
 import types
 import typing
+import uuid
+from datetime import date as _date
+from datetime import datetime as _datetime
+from datetime import time as _time
+from datetime import timedelta as _timedelta
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
@@ -33,6 +40,34 @@ def _python_type_to_vir_type(annotation: Any, seen=frozenset()) -> VirType:
         return VirType.bool()
     if annotation is str:
         return VirType(kind="string")
+    # -- formatted JSON strings -------------------------------------------
+    # These are plain JSON strings with an RFC 3339 / RFC 4122 / RFC 3986 shape.  They are
+    # *decoded* as strings and validated by the concrete schema/model afterwards, so the
+    # decoder needs a witness for the format (see ``veritas.textformats``).
+    if annotation is _datetime:
+        return VirType(kind="string", text_format="date-time")
+    if annotation is _date:
+        return VirType(kind="string", text_format="date")
+    if annotation is _time:
+        return VirType(kind="string", text_format="time")
+    if annotation is _timedelta:
+        return VirType(kind="string", text_format="duration")
+    if annotation is uuid.UUID:
+        return VirType(kind="string", text_format="uuid")
+    if annotation is ipaddress.IPv4Address:
+        return VirType(kind="string", text_format="ipv4")
+    if annotation is ipaddress.IPv6Address:
+        return VirType(kind="string", text_format="ipv6")
+    if annotation is Decimal:
+        # JSON Schema renders ``Decimal`` as ``anyOf: [number, string]``; a number is the
+        # branch we can contract, and Pydantic coerces it losslessly for typical values.
+        return VirType.real()
+    if isinstance(annotation, type) and annotation.__module__ == "pydantic.networks":
+        name = annotation.__name__
+        if "Url" in name or "Dsn" in name or name in {"AnyUrl"}:
+            return VirType(kind="string", text_format="uri", min_len=1)
+        if name == "EmailStr":
+            return VirType(kind="string", text_format="email")
     if annotation is type(None):
         return VirType(kind="null", nullable=True)
     if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
@@ -82,6 +117,22 @@ def _apply_metadata(vtype: VirType, meta: Any) -> None:
     text_format = getattr(meta, "format", None)
     if isinstance(text_format, str) and text_format:
         vtype.text_format = text_format
+    # ``Field(json_schema_extra={...})`` is the portable way to declare a JSON-Schema
+    # keyword that Pydantic has no first-class constraint for (``format``, ``pattern``...).
+    extra = getattr(meta, "json_schema_extra", None)
+    if isinstance(extra, dict):
+        if isinstance(extra.get("format"), str) and extra["format"]:
+            if vtype.text_format is None:
+                vtype.text_format = str(extra["format"])
+        if isinstance(extra.get("pattern"), str) and extra["pattern"]:
+            if vtype.pattern is None:
+                vtype.pattern = str(extra["pattern"])
+        if isinstance(extra.get("minLength"), int):
+            vtype.min_len = max(int(vtype.min_len or 0), int(extra["minLength"]))
+        if isinstance(extra.get("maxLength"), int):
+            current = int(vtype.max_len or 0)
+            limit = int(extra["maxLength"])
+            vtype.max_len = limit if not current else min(current, limit)
 
 
 def lower_pydantic_model(model: Any, seen=frozenset()) -> dict[str, Any]:
@@ -93,6 +144,9 @@ def lower_pydantic_model(model: Any, seen=frozenset()) -> dict[str, Any]:
         vtype = _python_type_to_vir_type(field.annotation, seen | {model})
         for meta in field.metadata or []:
             _apply_metadata(vtype, meta)
+        # ``Field(json_schema_extra={...})`` is attached to the ``FieldInfo`` itself, not to
+        # an annotated-type metadata entry, so read the field once more.
+        _apply_metadata(vtype, field)
         if vtype.kind == "dynamic_map" and vtype.item_type and vtype.item_type.kind in ("real", "int"):
             vtype.val_min = vtype.item_type.min if vtype.item_type.min is not None else float("-inf")
             vtype.val_max = vtype.item_type.max if vtype.item_type.max is not None else float("inf")
