@@ -116,6 +116,15 @@ class Interval:
     # ---- numeric prefix parsing (from blueprint) ----
     @staticmethod
     def from_numeric_prefix(raw_candidate, domain_bounds, allow_exp: bool = False) -> Interval:
+        from . import native as _native
+
+        span = _native.numeric_prefix_or_none(raw_candidate, domain_bounds, allow_exp)
+        if span is not None:
+            return span
+        return Interval._from_numeric_prefix_python(raw_candidate, domain_bounds, allow_exp)
+
+    @staticmethod
+    def _from_numeric_prefix_python(raw_candidate, domain_bounds, allow_exp: bool = False) -> Interval:
         if not isinstance(domain_bounds, Interval):
             try:
                 domain_bounds = Interval(domain_bounds[0], domain_bounds[1])

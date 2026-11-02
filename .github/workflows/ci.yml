@@ -5,12 +5,8 @@ on:
   pull_request:
 jobs:
   rust:
-    name: rust (${{ matrix.build }})
+    name: rust
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        build: [engine, bindings]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -18,18 +14,40 @@ jobs:
           components: clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: Engine tests
-        if: matrix.build == 'engine'
-        run: cargo test -p veritas-core --all-targets
-      - name: Engine clippy
-        if: matrix.build == 'engine'
-        run: cargo clippy -p veritas-core --all-targets -- -D warnings
-      - name: Python extension
-        if: matrix.build == 'bindings'
-        run: cargo build --release -p veritas-py
-      - name: Wasm inspector
-        if: matrix.build == 'bindings'
-        run: cargo build -p veritas-wasm --target wasm32-unknown-unknown
+      - name: Engine, clippy, bindings
+        run: |
+          set -o pipefail
+          {
+            echo "== cargo test (engine)"
+            cargo test -p veritas-core --all-targets
+            echo "== cargo clippy (engine, warnings are errors)"
+            cargo clippy -p veritas-core --all-targets -- -D warnings
+            echo "== cargo build (python extension)"
+            cargo build --release -p veritas-py
+            echo "== cargo build (wasm inspector)"
+            cargo build -p veritas-wasm --target wasm32-unknown-unknown
+          } 2>&1 | tee /tmp/rust.log
+      - name: Report diagnostics on the pull request
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY' > /tmp/payload.json || true
+          import json
+          text = ""
+          try:
+              text = open("/tmp/rust.log", errors="replace").read()
+          except OSError:
+              text = "no log captured"
+          head = text[:30000]
+          tail = text[-30000:] if len(text) > 30000 else ""
+          body = "Rust job diagnostics:\n```\n" + head
+          if tail:
+              body += "\n...[truncated]...\n" + tail
+          body += "\n```"
+          print(json.dumps({"body": body[:60000]}))
+          PY
+          gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --input /tmp/payload.json
   python:
     runs-on: ubuntu-latest
     strategy:

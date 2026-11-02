@@ -328,6 +328,25 @@ class TokenMasker:
         if prefix in self._cache:
             self._cache.move_to_end(prefix)
             return list(self._cache[prefix])
+        native_mask = None
+        if self.schema is None:
+            # The native automaton is an accelerator only: it must agree with the Python one
+            # (tests/test_native_backend.py), and anything unexpected falls back.
+            from . import native as _native
+            native_mask = _native.mask_or_none(prefix, self.vocabulary, self.eos_token)
+        if native_mask is not None:
+            self._cache[prefix] = tuple(native_mask)
+            if len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+            eos_ok = bool(
+                self.eos_token is not None
+                and self.eos_token < len(native_mask)
+                and native_mask[self.eos_token]
+            )
+            self.stats = MaskStats(
+                len(prefix), len(self.vocabulary), sum(native_mask), len(native_mask) - sum(native_mask), eos_ok
+            )
+            return native_mask
         base = self._state_for(prefix)
         # Empty text tokens cannot make progress and must never be sampled as grammar.
         mask = [bool(text) and base.clone().feed(text) for text in self.vocabulary]
