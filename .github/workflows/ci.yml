@@ -83,7 +83,34 @@ jobs:
             # With veritas_py importable this runs the whole suite *through* the native
             # masks and prefixes, including the 38 parity cases that skip otherwise.
             PYTHONPATH="$PWD/python" /tmp/native-venv/bin/python -m pytest tests/ -q
+            # Same call sites twice: with the extension, then with it disabled. Informational
+            # only - a shared runner is not a place to gate on wall-clock numbers.
+            echo "== native vs pure A/B"
+            PYTHONPATH="$PWD/python" /tmp/native-venv/bin/python benchmarks/native_speedup.py
+            echo "== end A/B"
           } 2>&1 | tee /tmp/native.log
+      - name: Publish the A/B measurement
+        if: success() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOG: /tmp/native.log
+        run: |
+          python3 - <<'PY' > /tmp/bench.json || true
+          import json, os, re
+          try:
+              text = open(os.environ.get("LOG", ""), errors="replace").read()
+          except OSError:
+              text = ""
+          match = re.search(r"== native vs pure A/B\n(.*?)== end A/B", text, re.S)
+          table = match.group(1).strip() if match else "benchmark output was not captured"
+          body = (
+              "Native engine A/B, measured on this run (informational; CI timings vary):\n```\n"
+              + table[:6000]
+              + "\n```\nReproduce locally with `python benchmarks/native_speedup.py`."
+          )
+          print(json.dumps({"body": body}))
+          PY
+          gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --input /tmp/bench.json
       - name: Report diagnostics on the pull request
         if: failure() && github.event_name == 'pull_request'
         env:

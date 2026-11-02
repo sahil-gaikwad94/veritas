@@ -47,5 +47,35 @@ reproducibility check, not a performance claim. Per-field work is visible in tel
 (`number_expansions`, `string_mask_prunes`, `contractor_prunes`, `preference_repairs`)
 rather than in this aggregate.
 
-This measures the Python reference path only. It does not measure a real LLM, GPU kernels,
-KV-cache surgery, or the experimental Rust workspace.
+This measures the Python reference path only. It does not measure a real LLM, GPU kernels or
+KV-cache surgery. For the native engine, see the A/B below.
+
+## Native engine: measured, not claimed
+
+`benchmarks/native_speedup.py` runs **the same Python call sites twice**, once with the
+compiled extension and once with `VERITAS_NO_NATIVE=1`, and reports median/p95 per call for
+each. Nothing is re-implemented for the benchmark: the workloads are `TokenMasker.valid_mask`
+(605-token JSON vocabulary, cache cleared so each call does real work) and
+`Interval.from_numeric_prefix` (160 literals spanning `0.3`, `00`, `1e-3`, `-7.5`). Each side
+runs in its own subprocess so import-time state cannot leak between them.
+
+```console
+$ maturin build --release -m crates/veritas-py/Cargo.toml -o dist
+$ pip install --no-deps dist/*.whl
+$ python benchmarks/native_speedup.py            # table
+$ python benchmarks/native_speedup.py --json     # machine-readable
+```
+
+Without the extension the script prints the import error and exits 0 rather than inventing a
+comparison. Pure-path baselines from one Linux x86-64 dev box (Python 3.11): `valid_mask`
+≈ **2.9 ms** per call on that 605-token vocabulary — the pure path clones and steps the
+automaton once per token — and `from_numeric_prefix` ≈ **4.8 µs** per call. The native side of
+those two numbers is published automatically by the `native extension` CI job, which runs this
+script against the wheel it just built; the job's log is the source of truth because a
+benchmark recorded on one developer machine is not evidence about another.
+
+Two honest caveats: the per-call Python↔Rust boundary costs a fraction of a microsecond, so
+cheap calls (short numeric prefixes) may gain little or nothing from delegation — the win is in
+per-token loops; and these figures are wall-clock medians on shared CI runners, which vary by
+tens of percent between runs. The numbers answer "is the accelerator wired up and worth its
+boundary cost", not "how fast is Veritas".

@@ -17,11 +17,14 @@ native path.
 from __future__ import annotations
 
 import importlib
+import os
 from collections.abc import Iterable, Sequence
 from typing import Any
 
 __all__ = [
+    "DISABLE_ENV",
     "available",
+    "disabled_by_env",
     "load_error",
     "info",
     "wire_version",
@@ -38,14 +41,28 @@ __all__ = [
 _NATIVE: Any | None = None
 _LOAD_ERROR: str | None = None
 
+#: Set to a truthy value to force the pure-Python engine. This is a debugging and measurement
+#: switch, not a feature flag: an operator who suspects the accelerator, or a benchmark that
+#: wants a controlled A/B of the *same* call sites, needs a way to pin the reference path
+#: without uninstalling anything.
+DISABLE_ENV = "VERITAS_NO_NATIVE"
+
 try:  # pragma: no cover - exercised by the wheels job, not by the pure-Python suite
     _NATIVE = importlib.import_module("veritas_py")
 except Exception as exc:  # pragma: no cover
     _LOAD_ERROR = f"{type(exc).__name__}: {exc}"
 
 
+def disabled_by_env() -> bool:
+    """True when :data:`DISABLE_ENV` asks for the pure-Python engine."""
+    value = os.environ.get(DISABLE_ENV, "")
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def available() -> bool:
-    """True when the compiled extension is loaded and its wire format matches."""
+    """True when the compiled extension is loaded, enabled and its wire format matches."""
+    if disabled_by_env():
+        return False
     if _NATIVE is None:
         return False
     expected = 1
@@ -57,6 +74,8 @@ def available() -> bool:
 
 def load_error() -> str | None:
     """Why the extension is unavailable, or ``None`` when it loaded."""
+    if disabled_by_env():
+        return f"disabled by {DISABLE_ENV}"
     return _LOAD_ERROR
 
 
@@ -68,7 +87,7 @@ def info() -> dict[str, Any]:
             "version": "pure",
             "wire_version": None,
             "native_available": False,
-            "load_error": _LOAD_ERROR,
+            "load_error": load_error(),
         }
     import json
 

@@ -218,3 +218,60 @@ def test_doctor_reports_the_loaded_engine():
     if not native.available():
         assert report["engine"]["load_error"]
     assert veritas.native is native
+
+
+def test_kill_switch_forces_the_pure_path(monkeypatch):
+    monkeypatch.setenv(native.DISABLE_ENV, "1")
+    assert native.disabled_by_env()
+    assert not native.available()
+    assert native.DISABLE_ENV in (native.load_error() or "")
+    assert native.info()["native_available"] is False
+    assert native.info()["load_error"] == f"disabled by {native.DISABLE_ENV}"
+    assert native.wire_version() is None
+    # The engine keeps working: the reference path answers instead.
+    assert native.prefix_status("{\"a\": 1}") == "complete"
+    assert native.mask("{\"a\": ", VOCABULARY, EOS) == TokenMasker(
+        VOCABULARY, eos_token=EOS
+    ).valid_mask("{\"a\": ")
+    assert not native.numeric_prefix("0.3", Interval(0.0, 1.0)).is_empty()
+    assert native.solve_linear([]) is None
+    assert native.contract({0: (0.0, 1.0)}, []) is None
+
+
+def test_kill_switch_is_read_per_call(monkeypatch):
+    # Not a module-level constant: a benchmark flips it without re-importing the package.
+    monkeypatch.delenv(native.DISABLE_ENV, raising=False)
+    before = native.available()
+    monkeypatch.setenv(native.DISABLE_ENV, "1")
+    assert native.available() is False
+    monkeypatch.setenv(native.DISABLE_ENV, "0")
+    assert native.available() is before
+
+
+def _load_benchmark():
+    import importlib.util
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "native_speedup_benchmark", root / "benchmarks" / "native_speedup.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_speedup_benchmark_only_times_legal_prefixes():
+    module = _load_benchmark()
+    vocabulary = module._vocabulary()
+    assert len(vocabulary) > 500
+    for prefix in module._prefixes(vocabulary):
+        machine = JSONPushdownAutomaton()
+        assert machine.feed(prefix) in (True, False)  # never raises
+    # measure() filters to the prefixes a decoder can actually hold.
+    report = module.measure(1, 1)
+    assert report["native_available"] is native.available()
+    assert report["vocabulary"] == len(vocabulary)
+    for workload in ("mask", "numeric_prefix"):
+        assert report[workload]["p50_us"] >= 0.0
+        assert report[workload]["p95_us"] >= report[workload]["p50_us"]
