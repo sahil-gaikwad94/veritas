@@ -206,3 +206,15 @@ def test_numeric_prefix_fallback_is_still_sound():
     assert not span.is_empty()
     assert math.isclose(span.lo, 0.3, abs_tol=1e-12)
     assert span.hi <= 0.5
+
+
+def test_doctor_reports_the_loaded_engine():
+    import veritas
+
+    report = veritas.doctor()
+    assert report["version"] == veritas.__version__
+    assert report["python"] == ("accelerated" if native.available() else "pure")
+    assert report["engine"]["native_available"] is native.available()
+    if not native.available():
+        assert report["engine"]["load_error"]
+    assert veritas.native is native

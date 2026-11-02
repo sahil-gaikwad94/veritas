@@ -245,19 +245,14 @@ pub fn negative_cycle(edges: &[DiffEdge]) -> Option<Vec<usize>> {
         changed = None;
         for (index, edge) in edges.iter().enumerate() {
             let from = distance[&edge.x];
-            let candidate = match from.checked_add(edge.weight) {
-                Some(value) => value,
-                None => return None,
-            };
+            let candidate = from.checked_add(edge.weight)?;
             if candidate < distance[&edge.y] {
                 distance.insert(edge.y, candidate);
                 previous.insert(edge.y, (edge.x, index));
                 changed = Some(edge.y);
             }
         }
-        if changed.is_none() {
-            return None;
-        }
+        changed?;
     }
     let start = changed?;
     // Walk back far enough to be inside the cycle, then collect it.
