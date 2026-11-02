@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn ready_rules_cascade_in_topological_order() {
-        let mut engine = ZeroDofEngine::new(vec![
+        let engine = ZeroDofEngine::new(vec![
             rule(
                 "mean",
                 &["a", "b"],

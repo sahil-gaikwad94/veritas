@@ -146,39 +146,48 @@ impl VeritasNanoSolver {
     }
 
     pub fn check(&mut self) -> SolverStatus {
-        let tracked = self.flatten();
-        let constraints: Vec<Linear> = tracked
-            .iter()
-            .map(|item| item.constraint.clone())
-            .collect();
-        let variables: BTreeSet<u32> = constraints
-            .iter()
-            .flat_map(|constraint| constraint.coeffs.iter().map(|(var, _)| *var))
-            .collect();
-        if variables.len() > self.max_variables {
-            self.status = SolverStatus::Unknown;
-            self.reason = format!("{} variables is more than the solver attempts", variables.len());
-            self.core.clear();
-            self.model.clear();
-            return self.status;
-        }
-        match solver::solve(&constraints) {
-            Outcome::Sat { model, .. } => {
-                self.status = SolverStatus::Sat;
+        // Everything borrowed from `self` is resolved inside this block, so the borrow ends
+        // before the state is updated.
+        let computed = {
+            let tracked = self.flatten();
+            let constraints: Vec<Linear> = tracked
+                .iter()
+                .map(|item| item.constraint.clone())
+                .collect();
+            let variables: BTreeSet<u32> = constraints
+                .iter()
+                .flat_map(|constraint| constraint.coeffs.iter().map(|(var, _)| *var))
+                .collect();
+            if variables.len() > self.max_variables {
+                Err(format!(
+                    "{} variables is more than the solver attempts",
+                    variables.len()
+                ))
+            } else {
+                match solver::solve(&constraints) {
+                    Outcome::Sat { model, .. } => Ok((SolverStatus::Sat, model, Vec::new(), String::new())),
+                    Outcome::Unsat { core } => Ok((
+                        SolverStatus::Unsat,
+                        Vec::new(),
+                        core.into_iter()
+                            .filter_map(|index| tracked.get(index).and_then(|item| item.tracker))
+                            .collect(),
+                        String::new(),
+                    )),
+                    Outcome::Unknown { reason } => {
+                        Ok((SolverStatus::Unknown, Vec::new(), Vec::new(), reason))
+                    }
+                }
+            }
+        };
+        match computed {
+            Ok((status, model, core, reason)) => {
+                self.status = status;
                 self.model = model;
-                self.core.clear();
-                self.reason.clear();
+                self.core = core;
+                self.reason = reason;
             }
-            Outcome::Unsat { core } => {
-                self.status = SolverStatus::Unsat;
-                self.core = core
-                    .into_iter()
-                    .filter_map(|index| tracked.get(index).and_then(|item| item.tracker))
-                    .collect();
-                self.model.clear();
-                self.reason.clear();
-            }
-            Outcome::Unknown { reason } => {
+            Err(reason) => {
                 self.status = SolverStatus::Unknown;
                 self.reason = reason;
                 self.core.clear();
