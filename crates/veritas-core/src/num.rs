@@ -68,6 +68,7 @@ pub struct Rational {
     den: i128,
 }
 
+#[allow(clippy::should_implement_trait)] // fallible ops: `Option` cannot be `std::ops::Add`
 impl Rational {
     pub const ZERO: Rational = Rational { num: 0, den: 1 };
     pub const ONE: Rational = Rational { num: 1, den: 1 };

@@ -15,6 +15,7 @@ pub enum Tri {
     Unknown,
 }
 
+#[allow(clippy::should_implement_trait)] // Kleene negation, also available via `!`
 impl Tri {
     pub fn and(self, other: Tri) -> Tri {
         match (self, other) {
@@ -46,6 +47,14 @@ impl Tri {
             Tri::False => Some(false),
             Tri::Unknown => None,
         }
+    }
+}
+
+impl std::ops::Not for Tri {
+    type Output = Tri;
+
+    fn not(self) -> Tri {
+        Tri::not(self)
     }
 }
 

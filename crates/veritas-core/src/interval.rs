@@ -14,6 +14,7 @@ pub struct Interval {
     pub hi: f64,
 }
 
+#[allow(clippy::should_implement_trait)] // names mirror `python/veritas/interval.py`
 impl Interval {
     pub const EMPTY: Interval = Interval {
         lo: f64::INFINITY,
