@@ -266,12 +266,12 @@ fn revise_quadratic_form(
 
     // Forward check: compute interval of the full quadratic form
     let mut total = Interval::point(0.0);
-    for i in 0..n {
+    for (i, row) in cholesky_l.iter().enumerate().take(n) {
         // y_i = Σⱼ L[i][j] * x[j]
         let mut y_i = Interval::point(0.0);
         for j in 0..=i {
             let var = vars[j];
-            let coeff = cholesky_l[i][j];
+            let coeff = row[j];
             if coeff == 0.0 {
                 continue;
             }
@@ -306,14 +306,14 @@ fn revise_quadratic_form(
             
             // Compute bounds of y_i without x_k
             let mut y_i_without_k = Vec::with_capacity(n);
-            for i in 0..n {
+            for (i, row) in cholesky_l.iter().enumerate().take(n) {
                 let mut y_i = Interval::point(0.0);
                 for j in 0..=i {
                     if j == k {
                         continue;
                     }
                     let var = vars[j];
-                    let coeff = cholesky_l[i][j];
+                    let coeff = row[j];
                     if coeff == 0.0 {
                         continue;
                     }
