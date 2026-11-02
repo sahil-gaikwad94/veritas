@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   pull_request:
+permissions:
+  contents: read
+  pull-requests: write
 jobs:
   rust:
     name: rust
@@ -27,6 +30,11 @@ jobs:
             echo "== cargo build (wasm inspector)"
             cargo build -p veritas-wasm --target wasm32-unknown-unknown
           } 2>&1 | tee /tmp/rust.log
+      - name: Annotate the first diagnostics
+        if: failure()
+        run: |
+          grep -E "(^error(\[E[0-9]+\])?:|^ +--> |panicked at|^---- |^failures:|^test .* FAILED|assertion)" /tmp/rust.log \
+            | head -12 | while IFS= read -r line; do echo "::error::$line"; done
       - name: Report diagnostics on the pull request
         if: failure() && github.event_name == 'pull_request'
         env:
