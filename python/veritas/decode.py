@@ -91,6 +91,9 @@ class DecodeConfig:
     seed: int | None = 0
     derive_missing: bool = True
     enforce_grammar: bool = True
+    #: If True, automatically compute integer/fraction digit limits from field bounds
+    #: when the configured limits would be too restrictive.
+    auto_scale_numeric_limits: bool = True
 
 
 @dataclass
@@ -276,6 +279,44 @@ class VeritasSession:
             key: Interval(bound.lo, bound.hi) for key, bound in self.contractor.domains.items()
         }
 
+    def _compute_numeric_limits(self, name: str) -> tuple[int, int]:
+        """Compute reasonable integer/fraction digit limits from field bounds.
+
+        Returns (max_integer_digits, max_fraction_digits) that can represent
+        the field's declared range without being overly restrictive.
+        """
+        vtype = self.types.get(name)
+        if vtype is None:
+            return self.config.max_integer_digits, self.config.max_fraction_digits
+
+        lo = getattr(vtype, "min", None)
+        hi = getattr(vtype, "max", None)
+        if lo is None or hi is None or not math.isfinite(lo) or not math.isfinite(hi):
+            return self.config.max_integer_digits, self.config.max_fraction_digits
+
+        # Compute max integer digits needed to represent the range
+        max_abs = max(abs(lo), abs(hi))
+        if max_abs == 0:
+            int_digits = 1
+        else:
+            int_digits = max(1, int(math.floor(math.log10(max_abs))) + 1)
+        # Add 1 for sign if negative values possible
+        if lo < 0:
+            int_digits += 1
+
+        # For fraction digits, use the configured default unless we can infer
+        # from the precision needed to distinguish values in the range
+        frac_digits = self.config.max_fraction_digits
+
+        # If the range is very small, we might need more fraction digits
+        span = hi - lo
+        if span > 0 and span < 1:
+            # Estimate digits needed to represent the span
+            needed_frac = max(0, int(math.ceil(-math.log10(span))) + 1)
+            frac_digits = max(frac_digits, min(needed_frac, 15))  # Cap at 15
+
+        return int_digits, frac_digits
+
     # ------------------------------------------------------------------
     # construction
     # ------------------------------------------------------------------
@@ -302,15 +343,49 @@ class VeritasSession:
             contractor.add_variable(self.vid[name], Interval(lo, hi))
         for clause in self.clauses:
             simple = simplify_clause(clause)
-            if simple is None:
-                continue
-            op, coeffs, rhs = simple
-            if not coeffs or any(key not in contractor.domains for key in coeffs):
-                continue
-            try:
-                contractor.add_constraint(("linear", dict(coeffs), float(rhs), op))
-            except Exception:
-                continue
+            if simple is not None:
+                op, coeffs, rhs = simple
+                if not coeffs or any(key not in contractor.domains for key in coeffs):
+                    continue
+                try:
+                    contractor.add_constraint(("linear", dict(coeffs), float(rhs), op))
+                except Exception:
+                    continue
+            # Also check for quadratic form constraints (quad_form_cholesky)
+            expr = clause.expr
+            if getattr(expr, "kind", None) == "quad_form_cholesky":
+                # Extract variable IDs from the args (weights)
+                var_ids = []
+                for arg in getattr(expr, "args", []) or []:
+                    if getattr(arg, "kind", None) == "var":
+                        var_ids.append(arg.var_id)
+                if var_ids and all(vid in contractor.domains for vid in var_ids):
+                    cholesky_l = getattr(expr, "cholesky_l", None)
+                    if cholesky_l is not None and len(cholesky_l) == len(var_ids):
+                        # Validate lower triangular structure
+                        valid = True
+                        for i, row in enumerate(cholesky_l):
+                            if len(row) != i + 1:
+                                valid = False
+                                break
+                        if valid:
+                            rhs_val = getattr(clause, "comparison", None)
+                            if rhs_val is not None:
+                                op, _zero, _tol = rhs_val
+                                # Get rhs from the comparison
+                                rhs_expr = expr.rhs if hasattr(expr, "rhs") else None
+                                if rhs_expr is not None and hasattr(rhs_expr, "value"):
+                                    rhs = float(rhs_expr.value)
+                                else:
+                                    # Try to get from comparison
+                                    rhs = 0.0
+                                try:
+                                    contractor.add_constraint((
+                                        "quadratic_form",
+                                        {"vars": var_ids, "cholesky_l": cholesky_l, "rhs": rhs, "op": op}
+                                    ))
+                                except Exception:
+                                    continue
         contractor.propagate()
         return contractor
 
@@ -966,7 +1041,7 @@ class VeritasSession:
             actions: list[str] = []
             for ch in "0123456789.-":
                 candidate = prefix + ch
-                if not self._number_prefix_ok(candidate, int_only):
+                if not self._number_prefix_ok(candidate, int_only, name):
                     continue
                 if Interval.from_numeric_prefix(
                     candidate, interval, self.config.allow_exponent
@@ -1065,7 +1140,7 @@ class VeritasSession:
                     text = text.rstrip("0").rstrip(".")
                 if text in ("", "-"):
                     text = "0"
-            if not self._number_prefix_ok(text, int_only):
+            if not self._number_prefix_ok(text, int_only, name):
                 continue
             if self._number_stop_ok(
                 text, interval, int_only, tabu_key, exclusive, name, declared
@@ -1093,7 +1168,7 @@ class VeritasSession:
         self._last_entropy = _entropy(_softmax([score for score, _, _ in scores]))
         return ordered
 
-    def _number_prefix_ok(self, prefix: str, int_only: bool) -> bool:
+    def _number_prefix_ok(self, prefix: str, int_only: bool, name: str | None = None) -> bool:
         if prefix == "":
             return False
         if prefix == "-":
@@ -1114,11 +1189,20 @@ class VeritasSession:
         integer, dot, fraction = body.partition(".")
         if integer and not integer.isdigit():
             return False
-        if integer and len(integer) > self.config.max_integer_digits:
+
+        # Determine limits: use dynamic scaling if enabled and field name provided
+        max_int_digits = self.config.max_integer_digits
+        max_frac_digits = self.config.max_fraction_digits
+        if self.config.auto_scale_numeric_limits and name is not None:
+            dyn_int, dyn_frac = self._compute_numeric_limits(name)
+            max_int_digits = max(max_int_digits, dyn_int)
+            max_frac_digits = max(max_frac_digits, dyn_frac)
+
+        if integer and len(integer) > max_int_digits:
             return False
         if integer and len(integer) > 1 and integer[0] == "0":
             return False
-        if dot and len(fraction) > self.config.max_fraction_digits:
+        if dot and len(fraction) > max_frac_digits:
             return False
         return True
 

@@ -172,6 +172,52 @@ pub fn parse_constraints(node: &Json) -> Result<(Vec<Constraint>, usize), String
                 rhs: as_f64(entry, "rhs")?,
                 op: as_op(entry)?,
             }),
+            "quadratic_form" => {
+                let vars = field(entry, "vars")?
+                    .as_array()
+                    .ok_or_else(|| "'quadratic_form' needs a 'vars' array".to_string())?
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_f64()
+                            .filter(|v| v.is_finite() && *v >= 0.0)
+                            .map(|v| v as u32)
+                            .ok_or_else(|| "'vars' must hold variable ids".to_string())
+                    })
+                    .collect::<Result<Vec<u32>, String>>()?;
+                let cholesky_l = field(entry, "cholesky_l")?
+                    .as_array()
+                    .ok_or_else(|| "'quadratic_form' needs a 'cholesky_l' array".to_string())?
+                    .iter()
+                    .map(|row| {
+                        row.as_array()
+                            .ok_or_else(|| "cholesky_l rows must be arrays".to_string())?
+                            .iter()
+                            .map(|value| {
+                                value
+                                    .as_f64()
+                                    .filter(|v| v.is_finite())
+                                    .ok_or_else(|| "cholesky_l entries must be finite numbers".to_string())
+                            })
+                            .collect::<Result<Vec<f64>, String>>()
+                    })
+                    .collect::<Result<Vec<Vec<f64>>, String>>()?;
+                // Validate lower triangular structure
+                if cholesky_l.len() != vars.len() {
+                    return Err("cholesky_l dimension must match vars length".to_string());
+                }
+                for (i, row) in cholesky_l.iter().enumerate() {
+                    if row.len() != i + 1 {
+                        return Err(format!("cholesky_l row {} must have length {}", i, i + 1));
+                    }
+                }
+                constraints.push(Constraint::QuadraticForm {
+                    vars,
+                    cholesky_l,
+                    rhs: as_f64(entry, "rhs")?,
+                    op: as_op(entry)?,
+                });
+            }
             _ => unsupported += 1,
         }
     }

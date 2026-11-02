@@ -14,6 +14,8 @@ Security properties enforced here:
   every check is explicit and reported.
 * Witness verification does **not** fill derived fields — a certificate must stand on the
   values it actually contains.
+* Optional Ed25519 digital signatures provide authenticity and non-repudiation.
+  A signed certificate can be verified with the corresponding public key.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, Optional, Union
 
 from ..compiler.vir import VirSpec, VirType
 from ..evaluate import expr_to_str
@@ -39,6 +41,18 @@ from ..serde import (
     spec_from_dict,
     spec_to_dict,
 )
+
+# Optional cryptography dependency for signing
+try:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.exceptions import InvalidSignature
+    _CRYPTO_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    _CRYPTO_AVAILABLE = False
+    ed25519 = None  # type: ignore
+    serialization = None  # type: ignore
+    InvalidSignature = Exception  # type: ignore
 
 T = TypeVar("T")
 
@@ -517,6 +531,111 @@ class ProofCertificate:
     def __str__(self) -> str:  # pragma: no cover - presentation
         return f"ProofCertificate(spec={self.spec_sha256[:12]}…, witness={self.witness_sha256[:12]}…)"
 
+    # -- cryptographic signing ---------------------------------------------
+    def _signing_payload(self) -> bytes:
+        """Compute the canonical payload for signing (excludes signature fields)."""
+        payload = self.digest_payload()
+        metadata = dict(payload.get("metadata", {}))
+        metadata.pop("signature", None)
+        metadata.pop("signature_algorithm", None)
+        payload["metadata"] = metadata
+        return canonical_json(payload).encode("utf-8")
+
+    def sign(self, private_key: Union[bytes, "ed25519.Ed25519PrivateKey"]) -> ProofCertificate:
+        """Sign the certificate with an Ed25519 private key.
+
+        The signature covers the canonical digest payload (same as ``sha256``).
+        Returns ``self`` for chaining.
+
+        Args:
+            private_key: Either raw 32-byte seed or an ``Ed25519PrivateKey`` object.
+
+        Raises:
+            RuntimeError: If ``cryptography`` is not installed.
+            ValueError: If the key format is invalid.
+        """
+        if not _CRYPTO_AVAILABLE:
+            raise RuntimeError("cryptography package is required for signing; install with 'pip install cryptography'")
+
+        if isinstance(private_key, bytes):
+            if len(private_key) != 32:
+                raise ValueError("Ed25519 private key seed must be 32 bytes")
+            signing_key = ed25519.Ed25519PrivateKey.from_private_bytes(private_key)
+        elif hasattr(private_key, "sign"):
+            signing_key = private_key
+        else:
+            raise ValueError("private_key must be 32-byte seed or Ed25519PrivateKey")
+
+        payload = self._signing_payload()
+        signature = signing_key.sign(payload)
+        self.metadata["signature"] = signature.hex()
+        self.metadata["signature_algorithm"] = "Ed25519"
+        # Update sha256 to include the signature in metadata
+        return self.seal()
+
+    def verify_signature(self, public_key: Union[bytes, "ed25519.Ed25519PublicKey"]) -> bool:
+        """Verify the certificate's Ed25519 signature.
+
+        Args:
+            public_key: Either raw 32-byte public key or an ``Ed25519PublicKey`` object.
+
+        Returns:
+            True if the signature is valid, False otherwise (including if no signature present).
+
+        Raises:
+            RuntimeError: If ``cryptography`` is not installed.
+        """
+        if not _CRYPTO_AVAILABLE:
+            raise RuntimeError("cryptography package is required for signature verification; install with 'pip install cryptography'")
+
+        sig_hex = self.metadata.get("signature")
+        algo = self.metadata.get("signature_algorithm")
+        if not sig_hex or algo != "Ed25519":
+            return False
+
+        if isinstance(public_key, bytes):
+            if len(public_key) != 32:
+                raise ValueError("Ed25519 public key must be 32 bytes")
+            verifying_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key)
+        elif hasattr(public_key, "verify"):
+            verifying_key = public_key
+        else:
+            raise ValueError("public_key must be 32-byte public key or Ed25519PublicKey")
+
+        payload = self._signing_payload()
+        signature = bytes.fromhex(sig_hex)
+        try:
+            verifying_key.verify(signature, payload)
+            return True
+        except InvalidSignature:
+            return False
+
+    @classmethod
+    def generate_keypair(cls) -> tuple[bytes, bytes]:
+        """Generate a new Ed25519 keypair.
+
+        Returns:
+            Tuple of (public_key, private_key_seed) both as 32-byte values.
+
+        Raises:
+            RuntimeError: If ``cryptography`` is not installed.
+        """
+        if not _CRYPTO_AVAILABLE:
+            raise RuntimeError("cryptography package is required for key generation; install with 'pip install cryptography'")
+
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        private_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        public_key = private_key.public_key()
+        public_bytes = public_key.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        return public_bytes, private_bytes
+
 
 # ---------------------------------------------------------------------------
 # verification
@@ -582,11 +701,14 @@ def verify_certificate(
     source: Any,
     *,
     expected_spec: Any = None,
+    verify_signature: Optional[Union[bytes, "ed25519.Ed25519PublicKey"]] = None,
 ) -> CertificateVerification:
     """Verify a certificate fully offline.
 
     Reconstructs the VIR spec from the payload and re-evaluates every constraint against
     the witness.  ``expected_spec`` additionally binds the certificate to a live spec.
+    ``verify_signature`` optionally provides an Ed25519 public key to verify the certificate's
+    digital signature.
     """
 
     checks: list[CertificateCheck] = []
@@ -668,8 +790,8 @@ def verify_certificate(
                 errors.extend(report.relaxation or [report.summary_line()])
             try:
                 expected_smt, coverage = render_smt2_with_coverage(spec, certificate.witness)
-                smt_bound = hmac.compare_digest(expected_smt, certificate.smt2)
-                smt_bound = smt_bound and hmac.compare_digest(sha256_hex(certificate.smt2), certificate.smt2_sha256 or "")
+                smt_bound = hmac.compare_digest(expected_smt.encode(), certificate.smt2.encode())
+                smt_bound = smt_bound and hmac.compare_digest(sha256_hex(certificate.smt2).encode(), (certificate.smt2_sha256 or "").encode())
                 coverage_bound = (certificate.smt2_complete == coverage["complete"] and
                                   _plain_data(certificate.smt2_omitted) == _plain_data(coverage["omitted"]))
                 checks.append(CertificateCheck("smt2_coverage", coverage_bound,
@@ -703,6 +825,18 @@ def verify_certificate(
                     errors.append("trusted live validators rejected the witness")
         except Exception as exc:
             checks.append(CertificateCheck("expected_spec", False, str(exc)))
+
+    # Verify digital signature if public key provided
+    if verify_signature is not None:
+        if not _CRYPTO_AVAILABLE:
+            checks.append(CertificateCheck("signature", False, "cryptography package not installed; cannot verify signature"))
+            errors.append("cryptography package required for signature verification")
+        else:
+            sig_ok = certificate.verify_signature(verify_signature)
+            checks.append(CertificateCheck("signature", sig_ok,
+                                           "Ed25519 signature valid" if sig_ok else "Ed25519 signature invalid or missing"))
+            if not sig_ok:
+                errors.append("certificate signature verification failed")
 
     return CertificateVerification(
         checks=checks,

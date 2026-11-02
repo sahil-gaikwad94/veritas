@@ -76,7 +76,7 @@ def test_host_adapters_attach_processors():
     model = SimpleNamespace(set_logits_processor=lambda p: attached.setdefault("p", p))
     patch_llamacpp(model, linear, tokenizer)
     assert attached["p"] is not None
-    assert model.veritas_grammar.startswith("\nroot")
+    assert model.veritas_grammar.startswith("root")
 
     sglang = SimpleNamespace(logits_processor=[])
     patch_sglang(sglang, linear, tokenizer)

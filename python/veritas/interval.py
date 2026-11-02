@@ -539,9 +539,50 @@ class Hc4AffineContractor:
                 # We'll just bound the container variable if possible; skip complex
                 return True
 
-            if kind in ("quad_form", "quad_form_cholesky"):
-                # Quadratic contraction is not implemented; do not pretend to narrow.
-                # The concrete verifier remains authoritative for these constraints.
+            if kind in ("quad_form", "quad_form_cholesky", "quadratic_form"):
+                # Quadratic contraction: forward check using Cholesky factor.
+                # The constraint is xᵀ A x op rhs where A = Lᵀ L (L is lower triangular).
+                # We compute the interval of the quadratic form and check compatibility.
+                if isinstance(cons, dict):
+                    vars_ = cons.get("vars", [])
+                    cholesky_l = cons.get("cholesky_l", [])
+                    rhs = cons.get("rhs", 0.0)
+                    op = cons.get("op", "eq")
+                else:
+                    # tuple form: ('quad_form_cholesky', vars, cholesky_l, rhs, op)
+                    vars_ = cons[1] if len(cons) > 1 else []
+                    cholesky_l = cons[2] if len(cons) > 2 else []
+                    rhs = cons[3] if len(cons) > 3 else 0.0
+                    op = cons[4] if len(cons) > 4 else "eq"
+                
+                if vars_ and cholesky_l and len(cholesky_l) == len(vars_):
+                    # Forward check: compute interval of quadratic form
+                    total = Interval(0.0, 0.0)
+                    n = len(vars_)
+                    for i in range(n):
+                        # y_i = Σⱼ L[i][j] * x[j]
+                        y_i = Interval(0.0, 0.0)
+                        for j in range(i + 1):
+                            var = vars_[j]
+                            coeff = cholesky_l[i][j]
+                            if coeff == 0.0:
+                                continue
+                            x_j = self._interval_for_var(var)
+                            y_i = y_i.add(x_j.scale(coeff))
+                        # y_i²
+                        y_i_sq = y_i.sqr()
+                        total = total.add(y_i_sq)
+                    
+                    target = Interval(rhs, rhs)
+                    if op in ("eq", "le", "lt"):
+                        if total.lo > target.hi + 1e-12:
+                            return False
+                    if op in ("eq", "ge", "gt"):
+                        if total.hi < target.lo - 1e-12:
+                            return False
+                    if op == "eq":
+                        if total.lo > target.hi + 1e-12 or total.hi < target.lo - 1e-12:
+                            return False
                 return True
 
         # dict form
@@ -553,6 +594,9 @@ class Hc4AffineContractor:
                 return self._revise_constraint(("sum", cons["vars"], cons.get("target", 0.0)))
             if kind in ("linear",):
                 return self._revise_constraint(("linear", cons["coeffs"], cons.get("target", 0.0), cons.get("op", "eq")))
+            if kind in ("quadratic_form",):
+                # Delegate to the tuple form handler above
+                return self._revise_constraint(cons)
 
         # VirExpr (very basic)
         try:

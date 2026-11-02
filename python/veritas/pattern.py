@@ -47,6 +47,22 @@ _CATEGORIES: dict[Any, Callable[[str], bool]] = {
     _sre_parse.CATEGORY_NOT_SPACE: lambda ch: not ch.isspace(),
     _sre_parse.CATEGORY_WORD: lambda ch: ch.isalnum() or ch == "_",
     _sre_parse.CATEGORY_NOT_WORD: lambda ch: not (ch.isalnum() or ch == "_"),
+    _sre_parse.CATEGORY_LINEBREAK: lambda ch: ch in "\n\r",
+    _sre_parse.CATEGORY_NOT_LINEBREAK: lambda ch: ch not in "\n\r",
+    # Locale-specific variants (approximate with standard behavior; may not exist in Python 3.13+)
+    getattr(_sre_parse, "CATEGORY_LOC_DIGIT", None): lambda ch: ch.isdecimal(),
+    getattr(_sre_parse, "CATEGORY_LOC_NOT_DIGIT", None): lambda ch: not ch.isdecimal(),
+    getattr(_sre_parse, "CATEGORY_LOC_SPACE", None): lambda ch: ch.isspace(),
+    getattr(_sre_parse, "CATEGORY_LOC_NOT_SPACE", None): lambda ch: not ch.isspace(),
+    getattr(_sre_parse, "CATEGORY_LOC_WORD", None): lambda ch: ch.isalnum() or ch == "_",
+    getattr(_sre_parse, "CATEGORY_LOC_NOT_WORD", None): lambda ch: not (ch.isalnum() or ch == "_"),
+    # Unicode-specific variants (approximate with standard behavior; may not exist in Python 3.13+)
+    getattr(_sre_parse, "CATEGORY_UNI_DIGIT", None): lambda ch: ch.isdecimal(),
+    getattr(_sre_parse, "CATEGORY_UNI_NOT_DIGIT", None): lambda ch: not ch.isdecimal(),
+    getattr(_sre_parse, "CATEGORY_UNI_SPACE", None): lambda ch: ch.isspace(),
+    getattr(_sre_parse, "CATEGORY_UNI_NOT_SPACE", None): lambda ch: not ch.isspace(),
+    getattr(_sre_parse, "CATEGORY_UNI_WORD", None): lambda ch: ch.isalnum() or ch == "_",
+    getattr(_sre_parse, "CATEGORY_UNI_NOT_WORD", None): lambda ch: not (ch.isalnum() or ch == "_"),
 }
 
 
@@ -162,7 +178,25 @@ class _Builder:
             return start, end
         if op is _sre_parse.AT:
             if av in (_sre_parse.AT_BEGINNING, _sre_parse.AT_BEGINNING_STRING,
-                      _sre_parse.AT_END, _sre_parse.AT_END_STRING):
+                      _sre_parse.AT_BEGINNING_LINE):
+                start, end = nfa.new_state(), nfa.new_state()
+                nfa.epsilon(start, end)
+                return start, end
+            if av in (_sre_parse.AT_END, _sre_parse.AT_END_STRING,
+                      _sre_parse.AT_END_LINE):
+                start, end = nfa.new_state(), nfa.new_state()
+                nfa.epsilon(start, end)
+                return start, end
+            if av in (_sre_parse.AT_BOUNDARY, _sre_parse.AT_NON_BOUNDARY,
+                      _sre_parse.AT_LOC_BOUNDARY, _sre_parse.AT_LOC_NON_BOUNDARY,
+                      _sre_parse.AT_UNI_BOUNDARY, _sre_parse.AT_UNI_NON_BOUNDARY):
+                # Word boundaries (\b, \B) are context-dependent and cannot be
+                # decided purely from the prefix.  Reject them so callers fall
+                # back to length bounds plus the concrete verifier.
+                raise UnsupportedPattern(f"anchor {av!r} (word boundary) is not supported for masking")
+            if av in (_sre_parse.AT_LOCALE, _sre_parse.AT_MULTILINE, _sre_parse.AT_UNICODE):
+                # These are flag-setting pseudo-anchors; they don't consume input.
+                # We treat them as epsilon (no-op) since flags are handled at compile time.
                 start, end = nfa.new_state(), nfa.new_state()
                 nfa.epsilon(start, end)
                 return start, end
@@ -232,12 +266,12 @@ def _strip_anchors(subpattern: Any) -> tuple[Any, bool, bool]:
     start_anchored = False
     end_anchored = False
     while items and items[0][0] is _sre_parse.AT and items[0][1] in (
-        _sre_parse.AT_BEGINNING, _sre_parse.AT_BEGINNING_STRING
+        _sre_parse.AT_BEGINNING, _sre_parse.AT_BEGINNING_STRING, _sre_parse.AT_BEGINNING_LINE
     ):
         start_anchored = True
         items.pop(0)
     while items and items[-1][0] is _sre_parse.AT and items[-1][1] in (
-        _sre_parse.AT_END, _sre_parse.AT_END_STRING
+        _sre_parse.AT_END, _sre_parse.AT_END_STRING, _sre_parse.AT_END_LINE
     ):
         end_anchored = True
         items.pop()
