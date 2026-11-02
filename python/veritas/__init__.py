@@ -20,22 +20,6 @@ from . import native
 
 __version__ = "2.0.0"
 
-
-def doctor() -> dict[str, Any]:
-    """Describe the loaded engine, including whether the native extension is in use.
-
-    ``native.available()`` is false on any install without a compiler, and the pure-Python
-    engine then does all the work; ``native.load_error()`` says why. That answer belongs in
-    one place, because "the extension did not load" is the first thing to check when a
-    deployment is slower than expected.
-    """
-    return {
-        "version": __version__,
-        "python": "pure" if not native.available() else "accelerated",
-        "engine": native.info(),
-        "wire_version": native.wire_version(),
-    }
-
 # --- authoring layer -------------------------------------------------------
 from .cartridges.sec import WorldState
 
@@ -411,3 +395,21 @@ __all__ = [
     "OutlinesAdapter",
     "synth",
 ]
+
+
+def doctor() -> dict[str, Any]:
+    """Describe the loaded engine, including whether the native extension is in use.
+
+    ``native.available()`` is false on any install without a compiler, and the pure-Python
+    engine then does all the work; ``native.load_error()`` says why. That answer belongs in
+    one place, because "the extension did not load" is the first thing to check when a
+    deployment is slower than expected.
+    """
+    return {
+        "version": __version__,
+        "python": "pure" if not native.available() else "accelerated",
+        "engine": native.info(),
+        "wire_version": native.wire_version(),
+    }
+
+
