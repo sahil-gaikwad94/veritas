@@ -73,12 +73,16 @@ jobs:
           {
             python -m pip install --upgrade pip maturin
             maturin build --release --manifest-path crates/veritas-py/Cargo.toml -o dist
-            python -m pip install --no-deps dist/*.whl
-            python -m pip install -e ".[dev]"
-            python -c "import veritas, veritas.native as n; assert n.available(), n.load_error(); print(veritas.doctor())"
+            # A fresh venv keeps the two distributions apart: the wheel provides the
+            # ``veritas_py`` extension module, while ``PYTHONPATH=python`` provides the pure
+            # Python package (pip would otherwise uninstall one as a rename of the other).
+            python -m venv /tmp/native-venv
+            /tmp/native-venv/bin/python -m pip install --upgrade pip pytest pydantic jsonschema hypothesis
+            /tmp/native-venv/bin/python -m pip install --no-deps dist/*.whl
+            PYTHONPATH="$PWD/python" /tmp/native-venv/bin/python -c "import veritas, veritas.native as n; assert n.available(), n.load_error(); print(veritas.doctor())"
             # With veritas_py importable this runs the whole suite *through* the native
             # masks and prefixes, including the 38 parity cases that skip otherwise.
-            pytest tests/ -q
+            PYTHONPATH="$PWD/python" /tmp/native-venv/bin/python -m pytest tests/ -q
           } 2>&1 | tee /tmp/native.log
       - name: Report diagnostics on the pull request
         if: failure() && github.event_name == 'pull_request'

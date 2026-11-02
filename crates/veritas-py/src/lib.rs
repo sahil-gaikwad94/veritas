@@ -54,6 +54,7 @@ fn document_value(text: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (prefix, vocabulary, eos=None))]
 fn allowed_tokens(prefix: &str, vocabulary: Vec<String>, eos: Option<String>) -> Vec<u32> {
     json::mask(prefix, &vocabulary, eos.as_deref())
 }
@@ -159,6 +160,7 @@ impl PdaHandle {
         self.inner.candidates(&vocabulary)
     }
 
+    #[pyo3(signature = (vocabulary, eos=None))]
     fn mask(&self, vocabulary: Vec<String>, eos: Option<String>) -> Vec<u32> {
         self.inner.mask(&vocabulary, eos.as_deref())
     }
