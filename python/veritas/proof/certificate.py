@@ -27,7 +27,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generic, TypeVar, Optional, Union
+from typing import Any, Generic, TypeVar
 
 from ..compiler.vir import VirSpec, VirType
 from ..evaluate import expr_to_str
@@ -541,7 +541,7 @@ class ProofCertificate:
         payload["metadata"] = metadata
         return canonical_json(payload).encode("utf-8")
 
-    def sign(self, private_key: Union[bytes, "ed25519.Ed25519PrivateKey"]) -> ProofCertificate:
+    def sign(self, private_key: bytes | ed25519.Ed25519PrivateKey) -> ProofCertificate:
         """Sign the certificate with an Ed25519 private key.
 
         The signature covers the canonical digest payload (same as ``sha256``).
@@ -573,7 +573,7 @@ class ProofCertificate:
         # Update sha256 to include the signature in metadata
         return self.seal()
 
-    def verify_signature(self, public_key: Union[bytes, "ed25519.Ed25519PublicKey"]) -> bool:
+    def verify_signature(self, public_key: bytes | ed25519.Ed25519PublicKey) -> bool:
         """Verify the certificate's Ed25519 signature.
 
         Args:
@@ -701,7 +701,7 @@ def verify_certificate(
     source: Any,
     *,
     expected_spec: Any = None,
-    verify_signature: Optional[Union[bytes, "ed25519.Ed25519PublicKey"]] = None,
+    verify_signature: bytes | ed25519.Ed25519PublicKey | None = None,
 ) -> CertificateVerification:
     """Verify a certificate fully offline.
 

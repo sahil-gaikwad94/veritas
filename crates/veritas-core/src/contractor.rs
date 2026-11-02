@@ -392,8 +392,8 @@ fn revise_quadratic_form(
             
             if found_feasible {
                 let narrowed = current_domain.intersect(Interval::new(
-                    crate::interval::next_down(feasible_lo),
-                    crate::interval::next_up(feasible_hi),
+                    crate::num::next_down(feasible_lo),
+                    crate::num::next_up(feasible_hi),
                 ));
                 if narrowed.is_empty() {
                     return Revise::Empty;
