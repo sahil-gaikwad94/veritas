@@ -82,7 +82,7 @@ pass:
 * Packaging is pure-Python setuptools with a `py.typed` marker; wheel and editable installs
   are smoke-tested. CI runs ruff, pytest, and wheel build on Python 3.11/3.12.
 
-Validation: `ruff check python tests` clean; `pytest tests/ -q` → **370 passed, 38 skipped** without the extension and **408 passed, 0 skipped** with it; wheel build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
+Validation: `ruff check python tests` clean; `pytest tests/ -q` → **370 passed, 41 skipped** without the extension and **411 passed, 0 skipped** with it; wheel build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
 
 ### Remaining known limits
 
@@ -159,9 +159,9 @@ The P1/P2 packaging and placeholder findings are closed. What changed, and how i
   refutes randomized constraints against a brute-force grid, re-checks every UNSAT core
   standalone, checks the numeric prefix mask against exhaustive completion of short literals,
   and cross-checks the automaton against the prefix classifier on random strings.
-* Parity with the Python engine is pinned by 38 cases in `tests/test_native_backend.py`
-  (masks, prefix classification, numeric prefixes, contraction, solving), so a native
-  regression costs speed, not soundness.
+* Parity with the Python engine is pinned by 38 hand-picked cases plus three randomized
+  differential sweeps in `tests/test_native_backend.py` (prefix verdicts, vocabulary masks,
+  numeric prefixes), so a native regression costs speed, not soundness.
 * `VERITAS_NO_NATIVE=1` disables the accelerator at runtime without reinstalling, which is
   what makes the A/B comparison in `benchmarks/native_speedup.py` meaningful and gives an
   operator a one-variable rollback.

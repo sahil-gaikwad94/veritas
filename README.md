@@ -269,11 +269,12 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **370 passed, 38 skipped** in the default install (compiler, preflight,
+Current status: **370 passed, 41 skipped** in the default install (compiler, preflight,
 instance verification, JSON PDA, token healing, decode engine, pattern masking, numeric
 search, structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end). The
-38 skips are the native/pure-Python parity corpus in `tests/test_native_backend.py`; with the
-extension built they run, so the whole suite is **408 passed, 0 skipped** *and* every other
+41 skips are the native/pure-Python parity corpus, the kill-switch tests that need a live
+engine, and the randomized differential sweep in `tests/test_native_backend.py`; with the
+extension built they run, so the whole suite is **411 passed, 0 skipped** *and* every other
 test then exercises the native masks and numeric prefixes.
 
 The Rust engine has its own 67 unit tests plus 9 property tests

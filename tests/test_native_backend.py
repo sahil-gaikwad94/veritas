@@ -275,3 +275,143 @@ def test_speedup_benchmark_only_times_legal_prefixes():
     for workload in ("mask", "numeric_prefix"):
         assert report[workload]["p50_us"] >= 0.0
         assert report[workload]["p95_us"] >= report[workload]["p50_us"]
+
+
+# --------------------------------------------------------------------------------------
+# Randomized differential checks. The corpus above is hand-picked; these sweep the input
+# spaces the corpus cannot enumerate, so "the accelerator agrees with the reference" is a
+# property rather than a list. They need the extension: without it there is nothing to
+# compare, and the shim would be compared with itself.
+# --------------------------------------------------------------------------------------
+
+DIFFERENTIAL_SEED = 0x5EED_0F_7A11
+
+
+def _differential_rng():
+    import random
+
+    return random.Random(DIFFERENTIAL_SEED)
+
+
+def _reference_prefix_status(text: str) -> str:
+    machine = JSONPushdownAutomaton()
+    if not machine.feed(text):
+        return "invalid"
+    probe = machine.clone()
+    probe.finish()
+    return "complete" if probe.accepts() else "incomplete"
+
+
+JSON_ALPHABET = "{}[]\":,01.-e+tru falsn\\\n\t5"
+
+
+def _random_prefix(rng, length: int) -> str:
+    return "".join(rng.choice(JSON_ALPHABET) for _ in range(length))
+
+
+def _random_document(rng, depth: int = 0) -> str:
+    """A small *valid* document. Prefixes are generated from these, not from noise: a decoder
+    only ever holds prefixes of documents the grammar admits."""
+    kind = rng.choice(["scalar"] if depth > 2 else ["scalar", "array", "object"])
+    if kind == "scalar":
+        return rng.choice(["null", "true", "false", "0", "-1.5", "1e3", '"a"', '"x y"', "7"])
+    if kind == "array":
+        items = [_random_document(rng, depth + 1) for _ in range(rng.randint(0, 3))]
+        return "[" + ", ".join(items) + "]"
+    keys = ["a", "b", "c"][: rng.randint(1, 3)]
+    return "{" + ", ".join(f'"{key}": {_random_document(rng, depth + 1)}' for key in keys) + "}"
+
+
+def _random_case(rng) -> str:
+    """A complete document, a truncation of one, or a one-character mutation of one."""
+    document = _random_document(rng)
+    roll = rng.random()
+    if roll < 0.35:
+        return document
+    if roll < 0.85:
+        text = document[: rng.randint(0, len(document) - 1)]
+        return text + (" " if rng.random() < 0.5 else "")
+    position = rng.randrange(len(document))
+    return document[:position] + rng.choice(JSON_ALPHABET) + document[position + 1 :]
+
+
+def _random_vocabulary(rng) -> list[str]:
+    tokens: list[str] = []
+    for _ in range(rng.randint(6, 18)):
+        if rng.random() < 0.15:
+            tokens.append("")  # an empty token must never be allowed
+        elif rng.random() < 0.5:
+            tokens.append(_random_prefix(rng, rng.randint(1, 3)))
+        else:
+            tokens.append(rng.choice(["}", "]", ", ", ": ", '"}', '"]', "null", "true", "0", "1.5", "e3", "-"]))
+    return tokens
+
+
+@requires_native
+def test_random_prefixes_agree_with_the_reference_automaton():
+    extension = pytest.importorskip("veritas_py")
+    rng = _differential_rng()
+    verdicts = {"complete": 0, "incomplete": 0, "invalid": 0}
+    for _ in range(600):
+        text = _random_case(rng)
+        expected = _reference_prefix_status(text)
+        verdicts[expected] += 1
+        assert extension.prefix_status(text) == expected, f"prefix {text!r}"
+    # A sweep that only ever produces one verdict proves nothing about the other two.
+    assert all(count > 20 for count in verdicts.values()), verdicts
+
+
+@requires_native
+def test_random_masks_agree_with_the_reference_masker():
+    rng = _differential_rng()
+    checked = 0
+    for _ in range(120):
+        vocabulary = _random_vocabulary(rng)
+        prefix = _random_case(rng)
+        if _reference_prefix_status(prefix) == "invalid":
+            continue
+        native_mask = native.mask_or_none(prefix, vocabulary, None)
+        assert native_mask is not None, "the native mask must answer for a legal prefix"
+        assert native_mask == TokenMasker(vocabulary).valid_mask(prefix), (
+            f"prefix {prefix!r} vocabulary {vocabulary!r}"
+        )
+        checked += 1
+    assert checked > 40, checked
+
+
+def _same_interval(lo, hi, other_lo, other_hi) -> bool:
+    both_empty = lo > hi and other_lo > other_hi
+    if both_empty:
+        return True
+    if (lo > hi) != (other_lo > other_hi):
+        return False
+    return math.isclose(lo, other_lo, rel_tol=1e-12, abs_tol=1e-12) and math.isclose(
+        hi, other_hi, rel_tol=1e-12, abs_tol=1e-12
+    )
+
+
+@requires_native
+def test_random_numeric_prefixes_agree_with_the_reference():
+    extension = pytest.importorskip("veritas_py")
+    rng = _differential_rng()
+    non_empty = 0
+    for _ in range(500):
+        digits = rng.randint(0, 3)
+        literal = rng.choice(["", "-"]) + str(rng.randint(0, 999))
+        if digits:
+            literal += "." + "".join(str(rng.randint(0, 9)) for _ in range(digits))
+        if rng.random() < 0.2:
+            literal += "e" + str(rng.randint(0, 4))
+        center = float(literal)
+        width = rng.choice([0.5, 2.0, 20.0, 200.0])
+        bounds = Interval(center - width * rng.uniform(0.1, 0.9), center + width * rng.uniform(0.1, 0.9))
+        for allow_exp in (False, True):
+            lo, hi = extension.numeric_prefix(literal, bounds.lo, bounds.hi, allow_exp)
+            reference = Interval._from_numeric_prefix_python(literal, bounds, allow_exp)
+            assert _same_interval(lo, hi, reference.lo, reference.hi), (
+                f"literal {literal!r} bounds {bounds} allow_exp={allow_exp}: "
+                f"native [{lo}, {hi}] vs python [{reference.lo}, {reference.hi}]"
+            )
+            if not reference.is_empty():
+                non_empty += 1
+    assert non_empty > 200, non_empty
