@@ -518,11 +518,7 @@ mod tests {
         ];
         for sample in samples {
             let pda = feed(sample);
-            let expected = match prefix_status(sample) {
-                Prefix::Complete => Prefix::Complete,
-                Prefix::Incomplete => Prefix::Incomplete,
-                Prefix::Invalid => Prefix::Invalid,
-            };
+            let expected = prefix_status(sample);
             let actual = if pda.accepts() {
                 Prefix::Complete
             } else if pda.is_alive() {

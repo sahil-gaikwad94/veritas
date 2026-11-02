@@ -95,6 +95,33 @@ impl Json {
     }
 }
 
+/// `json_number(value, precision)` from `python/veritas/json_pda.py`: round to `precision`
+/// decimals and render the shortest round-tripping form, integers without a decimal point.
+///
+/// Rounding is half-away-from-zero, where Python's `round` is half-to-even; the difference
+/// only shows up on exact ties, and the splice text is advisory (the value itself is exact).
+pub fn json_number(value: f64, precision: Option<u32>) -> String {
+    if !value.is_finite() {
+        return "null".to_string();
+    }
+    let rounded = match precision {
+        Some(digits) => round_to(value, digits),
+        None => value,
+    };
+    if rounded == rounded.trunc() && rounded.abs() < 1e16 {
+        return format!("{}", rounded as i64);
+    }
+    format!("{:?}", rounded)
+}
+
+pub fn round_to(value: f64, digits: u32) -> f64 {
+    let factor = 10f64.powi(digits as i32);
+    if !factor.is_finite() || factor == 0.0 {
+        return value;
+    }
+    (value * factor).round() / factor
+}
+
 pub fn render_number(value: f64) -> String {
     if !value.is_finite() {
         return "null".to_string();
