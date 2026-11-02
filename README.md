@@ -9,8 +9,11 @@ spliced without sampling, CDCL-style conflict analysis backtracks, and the final
 is verified concretely before it is returned. Results can be shipped with a self-contained
 proof certificate.
 
-This repository contains the **working Python reference engine** and a Rust workspace
-whose crates are still scaffolding (see [Status and limits](#status-and-limits)).
+This repository contains the **working Python reference engine** and a **Rust engine that
+ports every layer of it**: `crates/veritas-core` is dependency-free, unit- and
+property-tested, and reached from Python through an optional `abi3` extension that is used
+only as an accelerator (see [Status and limits](#status-and-limits) and
+[`docs/NATIVE.md`](docs/NATIVE.md)).
 
 ---
 
@@ -274,12 +277,12 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **373 passed, 41 skipped** in the default install (compiler, preflight,
+Current status: **378 passed, 41 skipped** in the default install (compiler, preflight,
 instance verification, JSON PDA, token healing, decode engine, pattern masking, numeric
 search, structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end). The
 41 skips are the native/pure-Python parity corpus, the kill-switch tests that need a live
 engine, and the randomized differential sweep in `tests/test_native_backend.py`; with the
-extension built they run, so the whole suite is **414 passed, 0 skipped** *and* every other
+extension built they run, so the whole suite is **419 passed, 0 skipped** *and* every other
 test then exercises the native masks and numeric prefixes.
 
 The Rust engine has its own 68 unit tests plus 11 property tests
@@ -313,8 +316,9 @@ Useful focused suites:
 - The **Python engine is the complete, tested product surface** in this repository; the Rust
   engine is a tested accelerator with the same semantics, not a replacement API.
 - `crates/veritas-core` is dependency-free (no crates, no C toolchain) and its 68 unit tests,
-  `clippy -D warnings`, the pyo3 build and the wasm build all run in CI. The session sandbox
-  has no Rust toolchain, so those results come from CI rather than from a local run.
+  11 property tests, `clippy -D warnings`, the pyo3 build and the wasm build all run in CI.
+  Using Veritas needs no Rust toolchain; every native claim here is backed by a CI run rather
+  than a developer's local build.
 - On a GitHub runner the accelerator is **17.9x** faster at `TokenMasker.valid_mask` over a
   605-token vocabulary and **1.5x** faster at `Interval.from_numeric_prefix` (4.07 ms → 0.23 ms
   and 5.7 µs → 3.9 µs per call); `benchmarks/native_speedup.py` reproduces the comparison and
