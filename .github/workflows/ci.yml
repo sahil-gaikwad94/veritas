@@ -39,12 +39,13 @@ jobs:
         if: failure() && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          LOG: /tmp/rust.log
         run: |
           python3 - <<'PY' > /tmp/payload.json || true
-          import json
-          text = ""
+          import json, os
+          path = os.environ.get("LOG", "/tmp/rust.log")
           try:
-              text = open("/tmp/rust.log", errors="replace").read()
+              text = open(path, errors="replace").read()
           except OSError:
               text = "no log captured"
           head = text[:30000]
@@ -56,6 +57,52 @@ jobs:
           print(json.dumps({"body": body[:60000]}))
           PY
           gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --input /tmp/payload.json
+  native:
+    name: native extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build, install and exercise the extension
+        run: |
+          set -o pipefail
+          {
+            python -m pip install --upgrade pip maturin
+            maturin build --release --manifest-path crates/veritas-py/Cargo.toml -o dist
+            python -m pip install --no-deps dist/*.whl
+            python -m pip install -e ".[dev]"
+            python -c "import veritas, veritas.native as n; assert n.available(), n.load_error(); print(veritas.doctor())"
+            # With veritas_py importable this runs the whole suite *through* the native
+            # masks and prefixes, including the 38 parity cases that skip otherwise.
+            pytest tests/ -q
+          } 2>&1 | tee /tmp/native.log
+      - name: Report diagnostics on the pull request
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOG: /tmp/native.log
+        run: |
+          python3 - <<'PY' > /tmp/payload.json || true
+          import json, os
+          path = os.environ.get("LOG", "/tmp/native.log")
+          try:
+              text = open(path, errors="replace").read()
+          except OSError:
+              text = "no log captured"
+          head = text[:30000]
+          tail = text[-30000:] if len(text) > 30000 else ""
+          body = "Native extension diagnostics:\n```\n" + head
+          if tail:
+              body += "\n...[truncated]...\n" + tail
+          body += "\n```"
+          print(json.dumps({"body": body[:60000]}))
+          PY
+          gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --input /tmp/payload.json
+
   python:
     runs-on: ubuntu-latest
     strategy:
