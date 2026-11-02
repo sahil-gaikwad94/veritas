@@ -82,7 +82,7 @@ pass:
 * Packaging is pure-Python setuptools with a `py.typed` marker; wheel and editable installs
   are smoke-tested. CI runs ruff, pytest, and wheel build on Python 3.11/3.12.
 
-Validation: `ruff check python tests` clean; `pytest tests/ -q` → **370 passed, 41 skipped** without the extension and **411 passed, 0 skipped** with it; wheel build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
+Validation: `ruff check python tests` clean; `pytest tests/ -q` → **372 passed, 41 skipped** without the extension and **413 passed, 0 skipped** with it; wheel build and isolated import/CLI smoke pass; `benchmarks/decode_smoke.py` reports 0 failures.
 
 ### Remaining known limits
 
@@ -164,4 +164,5 @@ The P1/P2 packaging and placeholder findings are closed. What changed, and how i
   numeric prefixes), so a native regression costs speed, not soundness.
 * `VERITAS_NO_NATIVE=1` disables the accelerator at runtime without reinstalling, which is
   what makes the A/B comparison in `benchmarks/native_speedup.py` meaningful and gives an
-  operator a one-variable rollback.
+  operator a one-variable rollback. A Rust panic degrades to the reference path instead of
+  escaping as a `BaseException`, and `docs/NATIVE.md` records the whole contract.

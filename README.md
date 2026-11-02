@@ -269,12 +269,12 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **370 passed, 41 skipped** in the default install (compiler, preflight,
+Current status: **372 passed, 41 skipped** in the default install (compiler, preflight,
 instance verification, JSON PDA, token healing, decode engine, pattern masking, numeric
 search, structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end). The
 41 skips are the native/pure-Python parity corpus, the kill-switch tests that need a live
 engine, and the randomized differential sweep in `tests/test_native_backend.py`; with the
-extension built they run, so the whole suite is **411 passed, 0 skipped** *and* every other
+extension built they run, so the whole suite is **413 passed, 0 skipped** *and* every other
 test then exercises the native masks and numeric prefixes.
 
 The Rust engine has its own 67 unit tests plus 9 property tests
@@ -313,7 +313,9 @@ Useful focused suites:
 - On a GitHub runner the accelerator is **17.9x** faster at `TokenMasker.valid_mask` over a
   605-token vocabulary and **1.5x** faster at `Interval.from_numeric_prefix` (4.07 ms → 0.23 ms
   and 5.7 µs → 3.9 µs per call); `benchmarks/native_speedup.py` reproduces the comparison and
-  the numbers, caveats included, are in `docs/BENCHMARKS.md`. The first is a per-token loop, the
+  the numbers, caveats included, are in `docs/BENCHMARKS.md`; the accelerator's contract
+  (build, wire format, fallback and panic behaviour, what is and is not accelerated) is
+  `docs/NATIVE.md`. The first is a per-token loop, the
   second is a handful of float operations dominated by the call boundary.
 - The native path is preferred only when `veritas.native.available()` is true, and every
   wrapper falls back to pure Python; `tests/test_native_backend.py` pins the parity, so a

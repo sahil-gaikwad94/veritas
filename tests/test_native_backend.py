@@ -415,3 +415,67 @@ def test_random_numeric_prefixes_agree_with_the_reference():
             if not reference.is_empty():
                 non_empty += 1
     assert non_empty > 200, non_empty
+
+
+# --------------------------------------------------------------------------------------
+# A crash in the accelerator must cost speed, not the decode. PyO3 reports a Rust panic as
+# `pyo3_runtime.PanicException`, which is a `BaseException`, so the fallback cannot be
+# `except Exception` — and Ctrl-C still has to work.
+# --------------------------------------------------------------------------------------
+
+
+class _ExtensionThatRaises:
+    WIRE_VERSION = 1
+
+    def __init__(self, error):
+        self.error = error
+
+    def prefix_status(self, text):
+        raise self.error
+
+    def canonical_document(self, text):
+        raise self.error
+
+    def allowed_tokens(self, prefix, vocabulary, eos):
+        raise self.error
+
+    def numeric_prefix(self, text, lo, hi, allow_exp):
+        raise self.error
+
+    def contract(self, domains, constraints, rounds):
+        raise self.error
+
+    def solve_linear(self, constraints):
+        raise self.error
+
+    def engine_info(self):
+        raise self.error
+
+
+class _RustPanic(BaseException):
+    """Stands in for `pyo3_runtime.PanicException`, which derives from `BaseException`."""
+
+
+def test_a_native_crash_degrades_to_the_reference_path(monkeypatch):
+    monkeypatch.delenv(native.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(native, "_NATIVE", _ExtensionThatRaises(_RustPanic("panicked at src/pda.rs")))
+    assert native.available()
+    assert native.prefix_status('{"a": 1}') == "complete"
+    assert native.canonical_document('{"b": 2, "a": 1}') == '{"b": 2, "a": 1}'
+    assert native.mask('{"a": ', VOCABULARY, EOS) == TokenMasker(
+        VOCABULARY, eos_token=EOS
+    ).valid_mask('{"a": ')
+    span = native.numeric_prefix("0.3", Interval(0.0, 1.0))
+    assert span.lo <= 0.3 <= span.hi
+    assert native.contract({0: (0.0, 1.0)}, []) is None
+    assert native.solve_linear([]) is None
+    assert native.info()["name"] == "veritas_py"
+
+
+def test_the_fallback_still_lets_ctrl_c_through(monkeypatch):
+    monkeypatch.delenv(native.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(native, "_NATIVE", _ExtensionThatRaises(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        native.prefix_status('{"a": 1}')
+    with pytest.raises(KeyboardInterrupt):
+        native.mask('{"a": ', VOCABULARY, EOS)

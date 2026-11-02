@@ -7,7 +7,12 @@ implementation on any error. That ordering matters:
 * an install without a compiler (or on an unsupported platform) behaves exactly like the
   pure-Python engine, so the test suite and the semantics never depend on the wheel;
 * a native bug can only make a mask narrower or a verdict "unknown", never silently accept a
-  document the Python automaton rejects — ``tests/test_native_backend.py`` pins the parity.
+  document the Python automaton rejects — ``tests/test_native_backend.py`` pins the parity;
+* a *crash* in the extension degrades too. PyO3 reports a Rust panic as
+  ``pyo3_runtime.PanicException``, which derives from ``BaseException`` rather than
+  ``Exception``, so falling back on ``Exception`` alone would let an accelerator bug escape as
+  a broken decode. Every native call catches ``BaseException`` except ``KeyboardInterrupt`` and
+  ``SystemExit``.
 
 ``veritas.doctor()`` reports :func:`available` and :func:`load_error`, because "the extension
 did not load" is the single most common support question for a package with an optional
@@ -53,6 +58,15 @@ except Exception as exc:  # pragma: no cover
     _LOAD_ERROR = f"{type(exc).__name__}: {exc}"
 
 
+def _never_a_fallback(error: BaseException) -> bool:
+    """True for the two ``BaseException`` subclasses that must keep propagating.
+
+    A Rust panic arrives as ``PanicException`` (a ``BaseException``), so the fallback has to
+    catch more than ``Exception``; Ctrl-C and ``sys.exit`` must not disappear into a retry.
+    """
+    return isinstance(error, (KeyboardInterrupt, SystemExit))
+
+
 def disabled_by_env() -> bool:
     """True when :data:`DISABLE_ENV` asks for the pure-Python engine."""
     value = os.environ.get(DISABLE_ENV, "")
@@ -93,7 +107,9 @@ def info() -> dict[str, Any]:
 
     try:
         described = json.loads(_NATIVE.engine_info())
-    except Exception:  # pragma: no cover
+    except BaseException as error:  # noqa: BLE001
+        if _never_a_fallback(error):  # pragma: no cover
+            raise
         described = {"name": "veritas_py"}
     described["native_available"] = True
     described["load_error"] = None
@@ -111,8 +127,9 @@ def prefix_status(text: str) -> str:
     if available():
         try:
             return str(_NATIVE.prefix_status(text))
-        except Exception:  # pragma: no cover - fall back, never raise from a probe
-            pass
+        except BaseException as error:  # noqa: BLE001 - a native crash must not decide a decode
+            if _never_a_fallback(error):  # pragma: no cover - control flow, not a bug path
+                raise
     from .json_pda import JSONPushdownAutomaton
 
     machine = JSONPushdownAutomaton()
@@ -128,8 +145,9 @@ def canonical_document(text: str) -> str | None:
     if available():
         try:
             return _NATIVE.canonical_document(text)
-        except Exception:  # pragma: no cover
-            pass
+        except BaseException as error:  # noqa: BLE001
+            if _never_a_fallback(error):  # pragma: no cover
+                raise
     from .json_pda import JSONSyntaxError, parse_json
 
     try:
@@ -164,7 +182,9 @@ def mask_or_none(
                 mask.append(False)
             mask[eos_token] = allowed == "complete"
         return mask
-    except Exception:  # pragma: no cover - any native failure falls back to Python
+    except BaseException as error:  # noqa: BLE001 - any native failure falls back to Python
+        if _never_a_fallback(error):  # pragma: no cover
+            raise
         return None
 
 
@@ -192,7 +212,9 @@ def numeric_prefix_or_none(raw_candidate: str, domain_bounds, allow_exp: bool = 
         lo, hi = _NATIVE.numeric_prefix(
             str(raw_candidate), float(domain_bounds.lo), float(domain_bounds.hi), allow_exp
         )
-    except Exception:  # pragma: no cover - fall back to Python
+    except BaseException as error:  # noqa: BLE001 - fall back to Python
+        if _never_a_fallback(error):  # pragma: no cover
+            raise
         return None
     return Interval(lo, hi)
 
@@ -218,7 +240,9 @@ def contract(domains: dict[Any, tuple[float, float]], constraints: Iterable[dict
         answer = _NATIVE.contract(
             json.dumps(wire_domains), json.dumps(list(constraints)), int(rounds)
         )
-    except Exception:  # pragma: no cover
+    except BaseException as error:  # noqa: BLE001
+        if _never_a_fallback(error):  # pragma: no cover
+            raise
         return None
     return json.loads(answer)
 
@@ -231,7 +255,9 @@ def solve_linear(constraints: Sequence[dict]):
 
     try:
         answer = json.loads(_NATIVE.solve_linear(json.dumps(list(constraints))))
-    except Exception:  # pragma: no cover
+    except BaseException as error:  # noqa: BLE001
+        if _never_a_fallback(error):  # pragma: no cover
+            raise
         return None
     if answer.get("status") == "unknown":
         return None
