@@ -1,6 +1,7 @@
 """veritas.bridges package (Phase 4)."""
 from .async_stream_proxy import *
 from .diffusion_bridge import *
+from .gbnf import *
 from .hf_transformers import *
 from .instructor_bridge import *
 from .llamacpp_bridge import *
