@@ -46,8 +46,10 @@ The panic row is the subtle one. `except Exception` would not catch a Rust panic
 catches `BaseException` and re-raises `KeyboardInterrupt`/`SystemExit`; the rest of the
 exception hierarchy is treated as "the accelerator is broken, use the reference path".
 
-`veritas.doctor()` and `veritas.native.info()` report the live engine and the reason it is
-missing, which is the fastest way to answer "why is this slow".
+`veritas doctor` (`veritas.doctor()` / `veritas.native.info()` in Python) reports the live
+engine and the reason it is missing, which is the fastest way to answer "why is this slow".
+`veritas doctor --strict` exits non-zero unless the accelerator is loaded, so a deployment
+health check can assert the engine it expects instead of hoping.
 
 ## What is actually accelerated
 
@@ -85,11 +87,12 @@ the accelerator rather than guessing:
 Four independent layers, all in CI:
 
 1. **Rust unit tests** — 68 examples over the modules, run by `cargo test -p veritas-core`.
-2. **Rust properties** — 10 tests in `crates/veritas-core/tests/soundness.rs`: contractor
+2. **Rust properties** — 11 tests in `crates/veritas-core/tests/soundness.rs`: contractor
    refutations never contain a satisfying point, UNSAT cores are re-solved standalone, the
    numeric prefix mask keeps every legal completion, the automaton and the parser agree on
    random strings, healing never reports an unverified splice, rendering and parsing are
-   inverse, and a domain report round-trips through the wire bit for bit.
+   inverse, jump-forward text parses as JSON and states the values it claims, and a domain
+   report round-trips through the wire bit for bit.
 3. **Hand-picked parity corpus** — 38 cases in `tests/test_native_backend.py` comparing the
    native answers with the pure-Python ones.
 4. **Randomized differential sweeps** (same file, `requires_native`): 600 prefix verdicts over

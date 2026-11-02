@@ -21,6 +21,7 @@ use veritas_core::pda::Pda;
 use veritas_core::solver::{self, Linear, Outcome};
 use veritas_core::token_healer::{ByteTokenizer, TokenHealer, Tokenizer};
 use veritas_core::wire;
+use veritas_core::zero_dof::{Values, ZeroDofEngine, ZeroDofRule};
 
 /// xorshift64*: tiny, deterministic, good enough for property tests.
 struct Rng(u64);
@@ -641,4 +642,89 @@ fn domain_reports_round_trip_through_the_wire() {
         }
     }
     assert!(special > 20, "the generator must exercise unbounded domains");
+}
+
+/// One rule over its own inputs, with an expression the sampler can also evaluate by hand.
+fn random_rule(rng: &mut Rng, target: &str, inputs: &[String]) -> ZeroDofRule {
+    let index = rng.below(inputs.len());
+    let constant = rng.pick(&[0.5, 1.0, 2.0, -1.0, 0.25]);
+    let op = rng.pick(&["add", "sub", "mul"]);
+    let wire = format!(
+        "{{\"t\":\"{}\",\"a\":{{\"t\":\"var\",\"id\":{}}},\"b\":{{\"t\":\"const\",\"v\":{}}}}}",
+        op, index, constant
+    );
+    ZeroDofRule::new(
+        target,
+        inputs.to_vec(),
+        Expr::from_json(&json::parse(&wire).expect("expression wire form")),
+        2 + rng.below(5) as u32,
+    )
+}
+
+/// Jump-forward text is *text*: the decoder appends it to the KV cache and stops looking. It
+/// must therefore be a valid JSON continuation that states the values the engine reports, and
+/// it must be the same text every time for the same inputs.
+#[test]
+fn jump_forward_text_is_valid_json_and_states_the_values() {
+    let seed = 0x2222_3333_4444_5555u64;
+    let mut rng = Rng::new(seed);
+    let mut spliced = 0usize;
+
+    for _ in 0..200 {
+        let width = 1 + rng.below(4);
+        let mut names: Vec<String> = Vec::new();
+        let mut rules: Vec<ZeroDofRule> = Vec::new();
+        let mut values: Values = BTreeMap::new();
+        for index in 0..width {
+            let target = format!("d{index}");
+            let input = format!("input{index}");
+            values.insert(input.clone(), rng.pick(&[0.5, 1.0, 2.0, -3.0, 4.25]));
+            let mut inputs = vec![input];
+            // A rule may depend on an earlier one, which cannot cycle by construction.
+            if index > 0 && rng.below(2) == 0 {
+                inputs.push(names[rng.below(names.len())].clone());
+            }
+            rules.push(random_rule(&mut rng, &target, &inputs));
+            names.push(target);
+        }
+
+        let mut engine = ZeroDofEngine::new(rules.clone());
+        let (text, computed) = engine.splice_json(&values, None, None);
+        assert_eq!(
+            computed.len(),
+            width,
+            "seed {seed}: every rule had its inputs, so every rule is ready"
+        );
+
+        // The splice continues an object the model has already opened; give it one field and
+        // the whole document must parse.
+        let document = format!("{{\"placeholder\": 0{}}}", text);
+        let parsed = json::parse(&document)
+            .unwrap_or_else(|error| panic!("seed {seed}: {document} does not parse: {error}"));
+        assert_eq!(
+            parsed.get("placeholder").and_then(|node| node.as_f64()),
+            Some(0.0)
+        );
+        for (name, value) in &computed {
+            let wire_value = parsed
+                .get(name)
+                .and_then(|node| node.as_f64())
+                .unwrap_or_else(|| panic!("seed {seed}: {name} is missing from {document}"));
+            assert_eq!(
+                wire_value.to_bits(),
+                value.to_bits(),
+                "seed {seed}: {name} reads back as {wire_value} but was computed as {value}"
+            );
+        }
+        let fields = engine.jump_forward_fields();
+        assert_eq!(fields.len(), computed.len(), "seed {seed}: one field per computed value");
+
+        // Same inputs, same text: a cache that depends on this must not see two answers.
+        let mut again = ZeroDofEngine::new(rules.clone());
+        assert_eq!(again.splice_json(&values, None, None).0, text, "seed {seed}");
+        if !text.is_empty() {
+            spliced += 1;
+        }
+    }
+    assert!(spliced > 150, "the generator must produce splices, got {spliced}");
 }

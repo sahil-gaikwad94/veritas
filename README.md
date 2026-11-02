@@ -114,6 +114,11 @@ python -m veritas inspect trace.json --out report.html
 # Infer a schema module from JSON examples, then compile the generated module.
 python -m veritas synth --from-json examples.json --out generated_schema.py
 python -m veritas check-spec generated_schema.py
+
+# Report the live engine: reference or accelerated, wire version, platform.
+python -m veritas doctor           # human-readable
+python -m veritas doctor --json    # for a bug report
+python -m veritas doctor --strict  # exit 1 unless the native extension is loaded
 ```
 
 `--from-doc` is deliberately explicit about requiring a model adapter rather than
@@ -277,7 +282,7 @@ engine, and the randomized differential sweep in `tests/test_native_backend.py`;
 extension built they run, so the whole suite is **414 passed, 0 skipped** *and* every other
 test then exercises the native masks and numeric prefixes.
 
-The Rust engine has its own 68 unit tests plus 10 property tests
+The Rust engine has its own 68 unit tests plus 11 property tests
 (`crates/veritas-core/tests/soundness.rs`) that refutes randomized constraints against a
 brute-force grid, re-checks every UNSAT core standalone and cross-checks the automaton against
 the prefix classifier. CI runs:
