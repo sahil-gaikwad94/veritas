@@ -7,7 +7,6 @@ the full schema rather than just generic JSON syntax.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 from ..compiler.vir import VirSpec, VirType
@@ -77,7 +76,7 @@ class GBNFGenerator:
     def _generate_spec_rules(self) -> None:
         """Generate rules for the spec's fields."""
         # First, create the base object and array rules so they can be referenced
-        self.rules["object"] = f'{{ ws (member (ws "," ws member)*)? ws }}'
+        self.rules["object"] = '{{ ws (member (ws "," ws member)*)? ws }}'
         self.rules["array"] = f'[ ws (value (ws "," ws value)*)? ws ]'
         self.rules["member"] = ""  # Will be populated below
 
@@ -106,7 +105,7 @@ class GBNFGenerator:
             self.rules["member"] = members
         else:
             self.rules["member"] = ""
-            self.rules["object"] = f'{{ ws }}'
+            self.rules["object"] = '{{ ws }}'
 
     def _generate_field_rule(self, field_name: str, vtype: VirType) -> str:
         """Generate a GBNF rule for a single field."""
@@ -174,7 +173,7 @@ class GBNFGenerator:
                     prop_rule = self._generate_field_rule(prop_name, prop_type)
                     prop_rules.append(f'"{prop_name}" ws ":" ws {prop_rule}')
                 members = " | ".join(prop_rules)
-                self.rules[rule_name] = f'{{ ws (member (ws "," ws member)*)? ws }}'
+                self.rules[rule_name] = '{{ ws (member (ws "," ws member)*)? ws }}'
                 self.rules[f"{rule_name}_member"] = members
             else:
                 self.rules[rule_name] = self.rules["object"]
