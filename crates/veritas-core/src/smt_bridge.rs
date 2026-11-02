@@ -253,15 +253,27 @@ fn sanitize(name: &str) -> String {
     out
 }
 
-/// Parse `(c0 c2)` into `["c0", "c2"]`.
+/// Parse `(c0 c2)` into `["c0", "c2"]`, keeping `|quoted symbols|` intact.
 fn parse_core(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .split_whitespace()
-        .map(|name| name.trim_start_matches('|').trim_end_matches('|').to_string())
-        .filter(|name| !name.is_empty())
-        .collect()
+    let inner = line.trim().trim_start_matches('(').trim_end_matches(')');
+    let mut names: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for ch in inner.chars() {
+        match ch {
+            '|' => quoted = !quoted,
+            ch if ch.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    names.push(std::mem::take(&mut current));
+                }
+            }
+            ch => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        names.push(current);
+    }
+    names
 }
 
 #[cfg(test)]
@@ -297,7 +309,7 @@ mod tests {
         bridge.assert_linear(&atom(&[(0, 1.0)], 1.0, CmpOp::In), Some("membership"));
         assert_eq!(bridge.assertion_count(), 0);
         bridge.assert_linear(&atom(&[(0, 1.0)], 1.0, CmpOp::Eq), Some("pinned"));
-        assert!(bridge.script().contains("(= (* 1.0 x0))"));
+        assert!(bridge.script().contains("(= (+ (* 1.0 x0)) 1.0)"));
     }
 
     #[test]

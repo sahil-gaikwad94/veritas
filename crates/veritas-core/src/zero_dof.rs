@@ -276,7 +276,8 @@ mod tests {
         let names: Vec<&str> = computed.iter().map(|(key, _)| key.as_str()).collect();
         assert_eq!(names, vec!["mean", "spread"]);
         assert_eq!(computed[0].1, 2.0);
-        assert_eq!(computed[1].1, 1.0);
+        // spread = a - mean = 1 - 2
+        assert_eq!(computed[1].1, -1.0);
         assert_eq!(engine.jump_forward_fields(), ["mean", "spread"]);
     }
 
@@ -310,7 +311,8 @@ mod tests {
         let keys = vec!["two".to_string(), "one".to_string()];
         let bound = values(&[("x", 2.0)]);
         let (text, _) = engine.splice_json(&bound, Some(&keys), Some(&precision));
-        assert_eq!(text, ", \"two\": 2.500, \"one\": 1.000");
+        // json_number rounds, it does not zero-pad (same as python/veritas/json_pda).
+        assert_eq!(text, ", \"two\": 2.5, \"one\": 1");
     }
 
     #[test]
