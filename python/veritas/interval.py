@@ -420,8 +420,12 @@ class Hc4AffineContractor:
                     # sum others interval
                     o_lo = sum(iv.lo for iv in others) if others else 0.0
                     o_hi = sum(iv.hi for iv in others) if others else 0.0
-                    # x_i = target - sum_others -> [target - o_hi, target - o_lo]
-                    new_iv = Interval(target - o_hi, target - o_lo)
+                    # x_i = target - sum_others -> [target - o_hi, target - o_lo].
+                    # Outward rounding is mandatory: without it the recurrence
+                    # ``a + b == 1`` can exclude a genuinely feasible point on the next
+                    # pass purely because of float error, and the contractor reports a
+                    # false dead end.
+                    new_iv = Interval(_next_down(target - o_hi), _next_up(target - o_lo))
                     cur = self._interval_for_var(vid)
                     inter = cur.intersect(new_iv)
                     if inter.is_empty():
@@ -451,14 +455,12 @@ class Hc4AffineContractor:
                             contrib_hi = coeffs[v] * (iv.hi if coeffs[v] >= 0 else iv.lo)
                             o_lo += contrib_lo
                             o_hi += contrib_hi
-                        rem_lo = target - o_hi
-                        rem_hi = target - o_lo
+                        rem_lo = _next_down(target - o_hi)
+                        rem_hi = _next_up(target - o_lo)
                         if c_i > 0:
-                            new_lo = rem_lo / c_i
-                            new_hi = rem_hi / c_i
+                            new_lo, new_hi = _next_down(rem_lo / c_i), _next_up(rem_hi / c_i)
                         else:
-                            new_lo = rem_hi / c_i
-                            new_hi = rem_lo / c_i
+                            new_lo, new_hi = _next_down(rem_hi / c_i), _next_up(rem_lo / c_i)
                         new_iv = Interval(new_lo, new_hi)
                         cur = self._interval_for_var(vid)
                         inter = cur.intersect(new_iv)
@@ -482,13 +484,13 @@ class Hc4AffineContractor:
                             o_lo += contrib_lo
                             o_hi += contrib_hi
                         if c_i > 0:
-                            hi = (target - o_lo) / c_i
+                            hi = _next_up((target - o_lo) / c_i)
                             cur = self._interval_for_var(vid)
                             inter = cur.intersect(Interval(float("-inf"), hi))
                         else:
                             # c_i < 0 flips the inequality; existence over the other
                             # intervals uses their lower sum, not their upper sum.
-                            lo = (target - o_lo) / c_i
+                            lo = _next_down((target - o_lo) / c_i)
                             cur = self._interval_for_var(vid)
                             inter = cur.intersect(Interval(lo, float("inf")))
                         if inter.is_empty():
@@ -511,11 +513,11 @@ class Hc4AffineContractor:
                             o_lo += contrib_lo
                             o_hi += contrib_hi
                         if c_i > 0:
-                            lo = (target - o_hi) / c_i
+                            lo = _next_down((target - o_hi) / c_i)
                             cur = self._interval_for_var(vid)
                             inter = cur.intersect(Interval(lo, float("inf")))
                         else:
-                            hi = (target - o_hi) / c_i
+                            hi = _next_up((target - o_hi) / c_i)
                             cur = self._interval_for_var(vid)
                             inter = cur.intersect(Interval(float("-inf"), hi))
                         if inter.is_empty():

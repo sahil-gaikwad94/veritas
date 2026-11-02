@@ -73,6 +73,15 @@ def _apply_metadata(vtype: VirType, meta: Any) -> None:
         vtype.min_len = int(meta.min_length)
     if getattr(meta, "max_length", None) is not None:
         vtype.max_len = int(meta.max_length)
+    pattern = getattr(meta, "pattern", None)
+    if isinstance(pattern, str) and pattern and vtype.pattern is None:
+        # JSON Schema ``pattern`` is conjunctive.  Masking with *one* of several patterns
+        # accepts a superset of the true language, which keeps the mask sound; the
+        # concrete schema validator remains authoritative for the intersection.
+        vtype.pattern = pattern
+    text_format = getattr(meta, "format", None)
+    if isinstance(text_format, str) and text_format:
+        vtype.text_format = text_format
 
 
 def lower_pydantic_model(model: Any, seen=frozenset()) -> dict[str, Any]:

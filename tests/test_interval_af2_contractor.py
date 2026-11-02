@@ -35,8 +35,27 @@ def test_prefix_reject_after_narrowing():
     c.set_value(0, 0.10)
     c.propagate()
     iv = c.get_bounds(1)
-    cand = Interval.from_numeric_prefix("0.3", iv, False)
-    assert cand.is_empty() or cand.intersect(iv).is_empty()
+    # Genuinely unreachable prefixes are rejected ...
+    for prefix in ("0.2", "0.6"):
+        cand = Interval.from_numeric_prefix(prefix, iv, False)
+        assert cand.is_empty() or cand.intersect(iv).is_empty()
+    # ... while the boundary prefix stays reachable: outward rounding keeps ~0.4 inside
+    # the contracted interval, and rejecting it would be unsound, not exact.
+    cand = Interval.from_numeric_prefix("0.4", iv, False)
+    assert not cand.intersect(iv).is_empty()
+
+
+def test_hc4_point_assignment_does_not_false_reject():
+    """Regression: outward rounding must not make a feasible equality look empty."""
+
+    c = Hc4AffineContractor()
+    c.add_variable(0, Interval(0.0, 1.0))
+    c.add_variable(1, Interval(0.0, 1.0))
+    c.add_constraint(("linear", {0: 1.0, 1: 1.0}, 1.0, "eq"))
+    c.set_domain(0, Interval(0.023, 0.023))
+    assert c.propagate() is True
+    bound = c.get_bounds(1)
+    assert abs(bound.lo - 0.977) < 1e-9 and abs(bound.hi - 0.977) < 1e-9
 
 
 def test_affine_form_cancellation():

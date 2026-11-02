@@ -126,8 +126,8 @@ pretending to infer from prose.
 | Layer | Modules | Responsibility |
 |---|---|---|
 | Authoring | `decorators.py`, `compiler/` | Compile Pydantic models + `require/derive/prefer/forall` into VIR; dependency graph; container analysis |
-| Pre-flight | `compiler/preflight.py`, `analysis.py`, `linear.py` | Interval contraction, AGDecode container feasibility, exact affine feasibility; contradictory specs fail before generation |
-| Tier 0 grammar | `json_pda.py`, `pda.py` | Deterministic JSON pushdown automaton, exact token masks over a vocabulary, canonical rendering |
+| Pre-flight | `compiler/preflight.py`, `analysis.py`, `linear.py` | Interval contraction, AGDecode container feasibility, exact affine feasibility, exact strict-bound refutation, checked string/pattern witnesses; contradictory specs fail before generation |
+| Tier 0 grammar | `json_pda.py`, `pda.py`, `pattern.py` | Deterministic JSON pushdown automaton, exact token masks over a vocabulary, canonical rendering, incremental `pattern`/length string masks |
 | Tier 1 numerics | `interval.py`, `linear.py`, `crane_mode.py` | Affine forms, HC4 contractor, residual containers, clause simplification |
 | Tier 2 search | `nano_solver.py`, `cdcl_jumpback.py` | Deterministic linear solver with unsat cores, CDCL conflict branches, tabu prefixes |
 | Acceleration | `zero_dof.py`, `token_healer.py` | Ready-field derivation, canonical JSON Jump-Forward splices, boundary healing |
@@ -142,13 +142,35 @@ pretending to infer from prose.
 
 - **Tier 0** rejects any token that would make the JSON prefix unparsable, and allows EOS
   only when the document is complete. The mask is computed against the supplied vocabulary;
-  it is not a heuristic character check.
+  it is not a heuristic character check. String fields are masked by `minLength`/
+  `maxLength` *and* by their JSON-Schema `pattern`: `pattern.py` compiles the regex to a
+  Thompson NFA and reports exactly which characters keep the prefix extendable. Patterns
+  outside the maskable subset (inline flags, backreferences, lookaround, word boundaries)
+  are rejected loudly and fall back to length-only masking with an entry in
+  `telemetry["pattern_fallbacks"]`, so the final verifier — never the mask — has the last
+  word.
 - **Tier 1** contracts numeric domains and dynamic-container residual sums. Contradictions
-  restore the previous domain snapshot instead of poisoning the search.
+  restore the previous domain snapshot instead of poisoning the search. Contraction is
+  outward-rounded, so a feasible equality such as `a + b == 1` can never be reported empty
+  because of float error. Open (`gt`/`lt`) bounds are represented by the adjacent
+  representable value for reals and by the neighbouring integer for ints, and the excluded
+  endpoint is refused at the stop decision as well as in the contractor. Open bounds are
+  *also* enforced for container elements (`forall(lst, lambda v: 0 < v < 1)`).
+- **Numeric search** is a bounded depth-first walk over digits and `.`/`-`, ordered by model
+  logits and pruned by the reachable interval, with a deterministic interior fallback when
+  the budget runs out. A greedy literal that leads to a dead end is abandoned for a
+  feasible sibling instead of failing the whole attempt.
 - **Tier 2** only returns `UNSAT` when it can prove it; budget/timeout yields `UNKNOWN`.
 - **Final verification** evaluates every constraint on the concrete object. A generated
   result is returned only if the report is `PASS`; if decoding exhausts its budget, the
-  engine emits a canonical valid object rather than truncated JSON.
+  engine emits a canonical valid object rather than truncated JSON. Structural failures
+  (missing required field, wrong type, pattern mismatch) are reported as concrete
+  `outcomes` naming the offending field, so `VerificationError` says *what* to fix instead
+  of "0 satisfied, 0 violated, 0 unevaluated".
+- **Soft preferences** (`vt.prefer`) steer generation: after a `PASS`, violated soft bounds
+  are intersected into the declared domain and the attempt is repeated while the weighted
+  preference score improves. Preferences never override hard constraints, and the accepted
+  result is the best-scoring verified one (`telemetry["preference_score"]`).
 
 Equality tolerances are applied at final verification, while contractor cuts use exact
 bounds. This avoids the classic false-infeasibility bug where an epsilon-padded cut rejects
@@ -241,14 +263,17 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **159 tests passing** (compiler, preflight, instance verification, JSON PDA,
-token healing, decode engine, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end).
+Current status: **303 tests passing** (compiler, preflight, instance verification, JSON PDA,
+token healing, decode engine, pattern masking, numeric search, structural diagnostics,
+proofs, cartridges, bridges, LTLf/RL and CLI end-to-end).
 
 Useful focused suites:
 
 ```bash
 .venv/bin/python -m pytest tests/test_instance_verification.py -q
 .venv/bin/python -m pytest tests/test_decode_engine.py -q
+.venv/bin/python -m pytest tests/test_pattern.py tests/test_numeric_search.py -q
+.venv/bin/python -m pytest tests/test_decode_robustness.py -q
 .venv/bin/python -m pytest tests/test_proofs.py -q
 .venv/bin/python -m pytest tests/test_bridges.py tests/test_cli_preflight.py -q
 ```
@@ -269,6 +294,15 @@ Useful focused suites:
   tolerance is intended. `derive` keeps a numeric equality tolerance by default.
 - The certificate verifier is self-contained. The optional Z3 oracle is exercised when
   `z3-solver` is installed; SymPy/CAS paths remain optional.
+- `pattern` masking covers a documented regex subset. Constructs that would need semantic
+  case folding or unbounded lookaround (`(?i)`, backreferences, word boundaries, lookaround)
+  are rejected and generation degrades to length-only masking with an explicit telemetry
+  entry; the verifier then rejects any mismatch instead of silently accepting it. Only the
+  first `pattern` on a field drives the mask when several are declared.
+- Numeric literals are bounded by `DecodeConfig.max_integer_digits`,
+  `max_fraction_digits` and `max_number_nodes`. A schema whose only solutions need more
+  digits than that is reported as a dead end (with the culprit field), not silently
+  rounded into a violation.
 - GPU/runtime bridges are adapter-tested with fakes. They are not integration-tested against
   live HF/vLLM/SGLang/llama.cpp servers, and vendor APIs may need host-specific wiring.
 - `--from-doc` requires a model adapter and intentionally fails loudly instead of inventing a

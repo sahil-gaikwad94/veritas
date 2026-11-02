@@ -22,6 +22,8 @@ class VirType:
     val_min: float = float("-inf")
     val_max: float = float("inf")
     nullable: bool = False
+    pattern: str | None = None
+    text_format: str | None = None
     min_exclusive: bool = False
     max_exclusive: bool = False
     item_type: VirType | None = None
@@ -126,6 +128,8 @@ class ContainerInfo:
     max_len: int | None = None
     elem_min: float = float("-inf")
     elem_max: float = float("inf")
+    elem_min_exclusive: bool = False
+    elem_max_exclusive: bool = False
     target_sum: float | None = None
     sum_tol: float = 1e-6
     sum_op: str = "eq"

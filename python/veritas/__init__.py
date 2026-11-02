@@ -128,6 +128,8 @@ from .ltlf import (
     evaluate as evaluate_formula,
 )
 from .nano_solver import SolverStatus, VeritasNanoSolver
+from .pattern import PatternConstraint, UnsupportedPattern
+from .pattern import matches as pattern_matches
 from .pda import PushdownAutomaton
 from .proof.certificate import (
     CertificateCheck,
@@ -332,7 +334,10 @@ __all__ = [
     # jump forward
     "ZeroDofEngine",
     "ZeroDofRule",
+    "PatternConstraint",
     "TokenHealer",
+    "pattern_matches",
+    "UnsupportedPattern",
     "ByteTokenizer",
     "JumpForwardPrefill",
     "TokenizerProtocol",
