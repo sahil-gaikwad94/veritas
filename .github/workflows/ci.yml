@@ -4,6 +4,32 @@ on:
     branches: [main]
   pull_request:
 jobs:
+  rust:
+    name: rust (${{ matrix.build }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [engine, bindings]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Engine tests
+        if: matrix.build == 'engine'
+        run: cargo test -p veritas-core --all-targets
+      - name: Engine clippy
+        if: matrix.build == 'engine'
+        run: cargo clippy -p veritas-core --all-targets -- -D warnings
+      - name: Python extension
+        if: matrix.build == 'bindings'
+        run: cargo build --release -p veritas-py
+      - name: Wasm inspector
+        if: matrix.build == 'bindings'
+        run: cargo build -p veritas-wasm --target wasm32-unknown-unknown
   python:
     runs-on: ubuntu-latest
     strategy:

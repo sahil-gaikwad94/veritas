@@ -4,6 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Deliberately dependency-free: the wheel must build with no C toolchain and no vendored
+# solver. If a dependency ever looks necessary, the answer is a smaller native surface.
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
