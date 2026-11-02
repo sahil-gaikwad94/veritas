@@ -22,6 +22,7 @@ native path.
 from __future__ import annotations
 
 import importlib
+import math
 import os
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -229,13 +230,43 @@ def numeric_prefix(raw_candidate: str, domain_bounds, allow_exp: bool = False):
     return Interval._from_numeric_prefix_python(raw_candidate, domain_bounds, allow_exp)
 
 
+def _wire_endpoint(value: float) -> float | None:
+    """JSON cannot print ±∞, so an unbounded endpoint travels as ``null``."""
+    value = float(value)
+    if math.isnan(value):
+        raise ValueError("a domain endpoint cannot be NaN")
+    return value if math.isfinite(value) else None
+
+
+def _read_interval(pair: Any) -> list[float]:
+    """Decode one wire domain: ``[]`` is empty, ``null`` is ±∞, ``[lo, hi]`` is a range."""
+    if not isinstance(pair, (list, tuple)):
+        raise ValueError("a wire domain must be an array")
+    if len(pair) == 0:
+        return [math.inf, -math.inf]
+    if len(pair) != 2:
+        raise ValueError("a wire domain must have two endpoints")
+    lo, hi = pair
+    return [
+        -math.inf if lo is None else float(lo),
+        math.inf if hi is None else float(hi),
+    ]
+
+
 def contract(domains: dict[Any, tuple[float, float]], constraints: Iterable[dict], *, rounds: int = 8):
-    """Run the native HC4 contractor; ``None`` when unavailable."""
+    """Run the native HC4 contractor; ``None`` when unavailable.
+
+    Domains travel with ``null`` for an unbounded endpoint and ``[]`` for an empty one, since
+    JSON cannot print ±∞; both are decoded back to floats here, so a caller always receives
+    numbers (an empty domain arrives as ``[inf, -inf]``).
+    """
     if not available():
         return None
     import json
 
-    wire_domains = {str(int(key)): [float(lo), float(hi)] for key, (lo, hi) in domains.items()}
+    wire_domains = {
+        str(int(key)): [_wire_endpoint(lo), _wire_endpoint(hi)] for key, (lo, hi) in domains.items()
+    }
     try:
         answer = _NATIVE.contract(
             json.dumps(wire_domains), json.dumps(list(constraints)), int(rounds)
@@ -244,7 +275,11 @@ def contract(domains: dict[Any, tuple[float, float]], constraints: Iterable[dict
         if _never_a_fallback(error):  # pragma: no cover
             raise
         return None
-    return json.loads(answer)
+    report = json.loads(answer)
+    wire_report = report.get("domains")
+    if isinstance(wire_report, dict):
+        report["domains"] = {key: _read_interval(pair) for key, pair in wire_report.items()}
+    return report
 
 
 def solve_linear(constraints: Sequence[dict]):

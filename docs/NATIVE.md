@@ -72,7 +72,11 @@ the accelerator rather than guessing:
 * `canonical_document(text) -> str | None`
 * `allowed_tokens(prefix, vocabulary, eos) -> list[int]`, `mask(...) -> list[bool]`
 * `numeric_prefix(text, lo, hi, allow_exp) -> (lo, hi)`, empty intervals as `(+inf, -inf)`
-* `contract(domains_json, constraints_json, rounds) -> domains_json`
+* `contract(domains_json, constraints_json, rounds) -> domains_json`. JSON cannot print ±∞, so on
+  the wire `null` is an unbounded endpoint and `[]` is an empty domain; both directions
+  translate, so Python callers only ever see floats (an empty domain arrives as
+  `[inf, -inf]`). A round-trip property in `soundness.rs` pins the mapping bit for bit,
+  including the intervals that are not numbers.
 * `solve_linear(constraints_json) -> {"status": "sat"|"unsat"|"unknown", ...}`
 * `engine_info() -> {"name", "version", "wire_version", "abi"}`
 

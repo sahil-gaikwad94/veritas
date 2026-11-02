@@ -29,6 +29,23 @@ pub fn number(value: f64) -> Json {
     Json::Number(value)
 }
 
+/// Print a bound: ±∞ travels as `null`, everything else as a round-tripping number.
+fn endpoint(value: f64) -> Json {
+    if value.is_finite() {
+        number(value)
+    } else {
+        Json::Null
+    }
+}
+
+/// Read a bound: `null` is -∞ for a lower endpoint and +∞ for an upper one.
+fn unbounded(node: &Json, infinite: f64) -> Option<f64> {
+    match node {
+        Json::Null => Some(infinite),
+        other => other.as_f64(),
+    }
+}
+
 fn field<'a>(node: &'a Json, key: &str) -> Result<&'a Json, String> {
     node.get(key)
         .ok_or_else(|| format!("missing field '{}'", key))
@@ -89,14 +106,16 @@ pub fn parse_domains(node: &Json) -> Result<BTreeMap<u32, Interval>, String> {
         let pair = value
             .as_array()
             .ok_or_else(|| format!("domain '{}' must be [lo, hi]", key))?;
+        if pair.is_empty() {
+            domains.insert(var, Interval::EMPTY);
+            continue;
+        }
         if pair.len() != 2 {
             return Err(format!("domain '{}' must have two endpoints", key));
         }
-        let lo = pair[0]
-            .as_f64()
+        let lo = unbounded(&pair[0], f64::NEG_INFINITY)
             .ok_or_else(|| format!("domain '{}' has a non-numeric lower bound", key))?;
-        let hi = pair[1]
-            .as_f64()
+        let hi = unbounded(&pair[1], f64::INFINITY)
             .ok_or_else(|| format!("domain '{}' has a non-numeric upper bound", key))?;
         if lo.is_nan() || hi.is_nan() {
             return Err(format!("domain '{}' is NaN", key));
@@ -196,10 +215,12 @@ pub fn parse_linear(node: &Json) -> Result<Vec<Linear>, String> {
 pub fn domains_json(contractor: &Contractor) -> Json {
     let mut entries = Vec::new();
     for (var, interval) in contractor.domains() {
+        // `null` is the wire spelling of an infinite bound: JSON cannot print ±∞, and an empty
+        // interval is `[]` so it cannot be confused with the unbounded `[null, null]`.
         let pair = if interval.is_empty() {
-            Json::Array(vec![number(f64::INFINITY), number(f64::NEG_INFINITY)])
+            Json::Array(Vec::new())
         } else {
-            Json::Array(vec![number(interval.lo), number(interval.hi)])
+            Json::Array(vec![endpoint(interval.lo), endpoint(interval.hi)])
         };
         entries.push((var.to_string(), pair));
     }
@@ -292,6 +313,26 @@ mod tests {
         assert!(contractor_json(&contractor, refuted)
             .render()
             .contains("\"status\": \"empty\""));
+    }
+
+    #[test]
+    fn unbounded_and_empty_domains_survive_the_wire() {
+        let node = parse(
+            "{\"0\": [null, 1.0], \"1\": [0.5, null], \"2\": [], \"3\": [null, null]}",
+        )
+        .unwrap();
+        let domains = parse_domains(&node).expect("unbounded domains parse");
+        assert_eq!(domains[&0], Interval::new(f64::NEG_INFINITY, 1.0));
+        assert_eq!(domains[&1], Interval::new(0.5, f64::INFINITY));
+        assert!(domains[&2].is_empty());
+        // `[null, null]` is the unbounded domain, not the empty one: the spellings differ.
+        assert_eq!(domains[&3], Interval::ENTIRE);
+
+        // The printer reproduces what the parser accepts, losslessly.
+        let contractor = Contractor::new(domains.clone());
+        let report = domains_json(&contractor);
+        assert_eq!(parse_domains(&report).expect("round trip"), domains);
+        assert!(report.render().contains("\"2\": []"));
     }
 
     #[test]

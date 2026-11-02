@@ -479,3 +479,33 @@ def test_the_fallback_still_lets_ctrl_c_through(monkeypatch):
         native.prefix_status('{"a": 1}')
     with pytest.raises(KeyboardInterrupt):
         native.mask('{"a": ', VOCABULARY, EOS)
+
+
+class _RecordingContractor:
+    """A fake extension that records the wire request and answers with the tricky shapes."""
+
+    WIRE_VERSION = 1
+
+    def __init__(self):
+        self.request = None
+
+    def contract(self, domains_json, constraints_json, rounds):
+        self.request = (domains_json, constraints_json, rounds)
+        # An empty domain and an unbounded one, exactly as the Rust printer emits them.
+        return '{"status": "feasible", "domains": {"0": [], "1": [null, 0.5], "2": [0.25, 1.0]}}'
+
+
+def test_contract_round_trips_unbounded_and_empty_domains(monkeypatch):
+    extension = _RecordingContractor()
+    monkeypatch.delenv(native.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(native, "_NATIVE", extension)
+    report = native.contract({0: (0.0, 1.0), 1: (float("-inf"), 2.0), 2: (math.inf, math.inf)}, [])
+    assert report["status"] == "feasible"
+    assert report["domains"]["0"] == [math.inf, -math.inf]
+    assert report["domains"]["1"] == [float("-inf"), 0.5]
+    assert report["domains"]["2"] == [0.25, 1.0]
+    # Nothing non-finite may enter the request: JSON cannot carry it, and a caller reading the
+    # log of native traffic must see the same shapes it will read back.
+    sent = extension.request[0]
+    assert "Infinity" not in sent and "NaN" not in sent
+    assert '"1": [null, 2.0]' in sent

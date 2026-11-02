@@ -20,6 +20,7 @@ use veritas_core::num::Rational;
 use veritas_core::pda::Pda;
 use veritas_core::solver::{self, Linear, Outcome};
 use veritas_core::token_healer::{ByteTokenizer, TokenHealer, Tokenizer};
+use veritas_core::wire;
 
 /// xorshift64*: tiny, deterministic, good enough for property tests.
 struct Rng(u64);
@@ -591,4 +592,53 @@ fn rationals_stay_exact_or_fail_closed() {
         }
     }
     assert!(Rational::new(1, 0).is_none());
+}
+
+/// The domain report must describe the machine that produced it, bit for bit — including the
+/// intervals JSON cannot print as numbers. A caller that reacts to the report (`status:
+/// "empty"`, a narrowed bound) acts on values that crossed a text boundary.
+#[test]
+fn domain_reports_round_trip_through_the_wire() {
+    let seed = 0x0BAD_C0DE_5EED_1234u64;
+    let mut rng = Rng::new(seed);
+    let mut special = 0usize;
+
+    for _ in 0..200 {
+        let mut domains: BTreeMap<u32, Interval> = BTreeMap::new();
+        for var in 0..(1 + rng.below(4)) as u32 {
+            let interval = match rng.below(8) {
+                0 => {
+                    special += 1;
+                    Interval::EMPTY
+                }
+                1 => {
+                    special += 1;
+                    Interval::new(f64::NEG_INFINITY, rng.range(-1.0, 1.0))
+                }
+                2 => {
+                    special += 1;
+                    Interval::new(rng.range(-1.0, 1.0), f64::INFINITY)
+                }
+                _ => {
+                    let lo = rng.range(-4.0, 4.0);
+                    Interval::new(lo, lo + rng.range(0.0, 4.0))
+                }
+            };
+            domains.insert(var, interval);
+        }
+
+        let rendered = wire::domains_json(&Contractor::new(domains.clone())).render();
+        let parsed = json::parse(&rendered).expect("the wire form is valid JSON");
+        let restored = wire::parse_domains(&parsed).expect("the wire form parses back");
+        assert_eq!(restored.len(), domains.len(), "seed {seed}: {rendered}");
+        for (var, interval) in &domains {
+            let back = restored.get(var).expect("every variable survives");
+            assert_eq!(
+                (back.lo.to_bits(), back.hi.to_bits()),
+                (interval.lo.to_bits(), interval.hi.to_bits()),
+                "seed {seed}: var {var} {interval:?} became {back:?} through {rendered}"
+            );
+        }
+    }
+    assert!(special > 20, "the generator must exercise unbounded domains");
 }
