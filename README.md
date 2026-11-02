@@ -269,14 +269,17 @@ not a live vendor deployment.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **367 passed, 38 skipped** in the default install (compiler, preflight,
+Current status: **370 passed, 38 skipped** in the default install (compiler, preflight,
 instance verification, JSON PDA, token healing, decode engine, pattern masking, numeric
 search, structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end). The
 38 skips are the native/pure-Python parity corpus in `tests/test_native_backend.py`; with the
-extension built they run, so the whole suite is **405 passed, 0 skipped** *and* every other
+extension built they run, so the whole suite is **408 passed, 0 skipped** *and* every other
 test then exercises the native masks and numeric prefixes.
 
-The Rust engine has its own 67 unit tests, run by CI:
+The Rust engine has its own 67 unit tests plus a property suite
+(`crates/veritas-core/tests/soundness.rs`) that refutes randomized constraints against a
+brute-force grid, re-checks every UNSAT core standalone and cross-checks the automaton against
+the prefix classifier. CI runs:
 
 ```bash
 cargo test -p veritas-core --all-targets
@@ -309,7 +312,9 @@ Useful focused suites:
 - The native path is preferred only when `veritas.native.available()` is true, and every
   wrapper falls back to pure Python; `tests/test_native_backend.py` pins the parity, so a
   native regression costs speed, not soundness. `veritas.native.info()` reports the loaded
-  engine and why it is missing otherwise.
+  engine and why it is missing otherwise. Set **`VERITAS_NO_NATIVE=1`** to force the reference
+  path (checked per call, no reinstall), and run `python benchmarks/native_speedup.py` to see
+  what the accelerator actually buys on your machine instead of trusting a headline number.
 - The grammar tier recognizes **JSON**, not arbitrary context-free grammars. Schema-guided
   masking supports a documented JSON Schema subset (objects/arrays/scalars, `anyOf`/`oneOf`,
   local `$ref`, required/arity/range/enum); unsupported keywords fail loudly. Token masking
