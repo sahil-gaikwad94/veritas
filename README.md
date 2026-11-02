@@ -276,7 +276,7 @@ search, structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end
 extension built they run, so the whole suite is **408 passed, 0 skipped** *and* every other
 test then exercises the native masks and numeric prefixes.
 
-The Rust engine has its own 67 unit tests plus a property suite
+The Rust engine has its own 67 unit tests plus 9 property tests
 (`crates/veritas-core/tests/soundness.rs`) that refutes randomized constraints against a
 brute-force grid, re-checks every UNSAT core standalone and cross-checks the automaton against
 the prefix classifier. CI runs:
@@ -309,6 +309,11 @@ Useful focused suites:
 - `crates/veritas-core` is dependency-free (no crates, no C toolchain) and its 67 unit tests,
   `clippy -D warnings`, the pyo3 build and the wasm build all run in CI. The session sandbox
   has no Rust toolchain, so those results come from CI rather than from a local run.
+- On a GitHub runner the accelerator is **17.9x** faster at `TokenMasker.valid_mask` over a
+  605-token vocabulary and **1.5x** faster at `Interval.from_numeric_prefix` (4.07 ms → 0.23 ms
+  and 5.7 µs → 3.9 µs per call); `benchmarks/native_speedup.py` reproduces the comparison and
+  the numbers, caveats included, are in `docs/BENCHMARKS.md`. The first is a per-token loop, the
+  second is a handful of float operations dominated by the call boundary.
 - The native path is preferred only when `veritas.native.available()` is true, and every
   wrapper falls back to pure Python; `tests/test_native_backend.py` pins the parity, so a
   native regression costs speed, not soundness. `veritas.native.info()` reports the loaded

@@ -67,12 +67,26 @@ $ python benchmarks/native_speedup.py --json     # machine-readable
 ```
 
 Without the extension the script prints the import error and exits 0 rather than inventing a
-comparison. Pure-path baselines from one Linux x86-64 dev box (Python 3.11): `valid_mask`
-≈ **2.9 ms** per call on that 605-token vocabulary — the pure path clones and steps the
-automaton once per token — and `from_numeric_prefix` ≈ **4.8 µs** per call. The native side of
-those two numbers is published automatically by the `native extension` CI job, which runs this
-script against the wheel it just built; the job's log is the source of truth because a
-benchmark recorded on one developer machine is not evidence about another.
+comparison.
+
+Measured by the `native extension` CI job on a GitHub `ubuntu-latest` runner (Python 3.12.15,
+run 41395204893, 2026-11-02), against the wheel that job had just built:
+
+| workload (per call) | pure Python | native | speedup |
+| --- | ---: | ---: | ---: |
+| `TokenMasker.valid_mask`, 605-token vocabulary | 4067 µs | 227 µs | **17.9x** |
+| `Interval.from_numeric_prefix`, 160 literals | 5.69 µs | 3.88 µs | **1.5x** |
+
+The shape is what the design predicts. `valid_mask` is a per-token loop — 605 clones and steps
+of the automaton, each with Python object overhead — so moving it into Rust removes almost all
+of the cost. A single numeric prefix is a handful of float operations, so what the native path
+saves there is mostly the interpreter's work, and a third of the remaining time is the
+Python↔Rust call boundary itself. That is also why the delegation is worth keeping despite the
+modest second number: it is never *slower*, and it becomes the dominant win in the loop where
+it matters.
+
+These are wall-clock medians on shared runners and vary by tens of percent between runs. They
+answer "is the accelerator wired up and worth its boundary cost", not "how fast is Veritas".
 
 Two honest caveats: the per-call Python↔Rust boundary costs a fraction of a microsecond, so
 cheap calls (short numeric prefixes) may gain little or nothing from delegation — the win is in

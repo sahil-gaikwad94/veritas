@@ -109,17 +109,6 @@ impl Atom {
             Atom::Invalid => None,
         }
     }
-
-    fn linear(&self) -> Option<Linear> {
-        match self {
-            Atom::Linear { coeffs, rhs, op } => Some(Linear {
-                coeffs: coeffs.clone(),
-                rhs: *rhs,
-                op: *op,
-            }),
-            _ => None,
-        }
-    }
 }
 
 fn holds(value: f64, rhs: f64, op: CmpOp, slack: f64) -> bool {
