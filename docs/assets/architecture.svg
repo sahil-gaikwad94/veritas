@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420">
+  <defs>
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#e0e7ff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#c7d2fe;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#fce7f3;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#fbcfe8;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="g3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#ccfbf1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#99f6e4;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="g4" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#fef3c7;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#fde047;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="g5" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#dbeafe;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#bfdbfe;stop-opacity:1" />
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="450" y="30" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-size="18" font-weight="700" fill="#0f172a" text-anchor="middle">Veritas engine layers</text>
+
+  <!-- Layer boxes: (x, y, w, h, title, subtitle, gradient) -->
+  <g id="layer-authoring">
+    <rect x="30" y="60" width="140" height="100" rx="8" fill="url(#g1)" stroke="#6366f1" stroke-width="2" />
+    <text x="100" y="88" font-family="system-ui" font-size="14" font-weight="700" fill="#3730a3" text-anchor="middle">Authoring</text>
+    <text x="100" y="110" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">Pydantic + VIR</text>
+    <text x="100" y="132" font-family="system-ui" font-size="11" fill="#64748b" text-anchor="middle">decorators, compiler</text>
+  </g>
+  <g id="layer-preflight">
+    <rect x="190" y="60" width="140" height="100" rx="8" fill="url(#g2)" stroke="#c026d3" stroke-width="2" />
+    <text x="260" y="88" font-family="system-ui" font-size="14" font-weight="700" fill="#86198f" text-anchor="middle">Pre-flight</text>
+    <text x="260" y="110" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">Intervals &amp; affine</text>
+    <text x="260" y="132" font-family="system-ui" font-size="11" fill="#64748b" text-anchor="middle">contraction, feasibility</text>
+  </g>
+  <g id="layer-tier0">
+    <rect x="350" y="60" width="140" height="100" rx="8" fill="url(#g3)" stroke="#0ea5e9" stroke-width="2" />
+    <text x="420" y="88" font-family="system-ui" font-size="14" font-weight="700" fill="#0c4a6e" text-anchor="middle">Tier 0: Grammar</text>
+    <text x="420" y="110" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">JSON PDA + masks</text>
+    <text x="420" y="132" font-family="system-ui" font-size="11" fill="#64748b" text-anchor="middle">token-healing, patterns</text>
+  </g>
+  <g id="layer-tier1">
+    <rect x="510" y="60" width="140" height="100" rx="8" fill="url(#g4)" stroke="#b45309" stroke-width="2" />
+    <text x="580" y="88" font-family="system-ui" font-size="14" font-weight="700" fill="#92400e" text-anchor="middle">Tier 1: Numerics</text>
+    <text x="580" y="110" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">HC4 contractor</text>
+    <text x="580" y="132" font-family="system-ui" font-size="11" fill="#64748b" text-anchor="middle">affine forms, domains</text>
+  </g>
+  <g id="layer-tier2">
+    <rect x="670" y="60" width="140" height="100" rx="8" fill="url(#g5)" stroke="#059669" stroke-width="2" />
+    <text x="740" y="88" font-family="system-ui" font-size="14" font-weight="700" fill="#047857" text-anchor="middle">Tier 2: Search</text>
+    <text x="740" y="110" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">CDCL + jumpback</text>
+    <text x="740" y="132" font-family="system-ui" font-size="11" fill="#64748b" text-anchor="middle">unsat cores, solver</text>
+  </g>
+
+  <!-- Arrows between layers -->
+  <line x1="170" y1="110" x2="190" y2="110" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <line x1="330" y1="110" x2="350" y2="110" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <line x1="490" y1="110" x2="510" y2="110" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <line x1="650" y1="110" x2="670" y2="110" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+
+  <!-- Bottom row: acceleration / decoding / verification -->
+  <g id="layer-decode">
+    <rect x="30" y="220" width="200" height="110" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="2" />
+    <text x="130" y="248" font-family="system-ui" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Decoding</text>
+    <text x="130" y="270" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">session orchestration,</text>
+    <text x="130" y="288" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">masks, splices, trace</text>
+    <text x="130" y="306" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">final verification</text>
+  </g>
+  <g id="layer-native">
+    <rect x="250" y="220" width="200" height="110" rx="8" fill="#f8fafc" stroke="#6366f1" stroke-width="2" />
+    <text x="350" y="248" font-family="system-ui" font-size="14" font-weight="700" fill="#3730a3" text-anchor="middle">Native accelerator</text>
+    <text x="350" y="270" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">crates/veritas-core</text>
+    <text x="350" y="288" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">Rust, optional, Python</text>
+    <text x="350" y="306" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">stays authoritative</text>
+  </g>
+  <g id="layer-proof">
+    <rect x="470" y="220" width="200" height="110" rx="8" fill="#fdf2f8" stroke="#c026d3" stroke-width="2" />
+    <text x="570" y="248" font-family="system-ui" font-size="14" font-weight="700" fill="#86198f" text-anchor="middle">Proof certificates</text>
+    <text x="570" y="270" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">SMT-LIB2 + witness</text>
+    <text x="570" y="288" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">offline verification</text>
+  </g>
+  <g id="layer-bridges">
+    <rect x="690" y="220" width="200" height="110" rx="8" fill="#f0fdf4" stroke="#059669" stroke-width="2" />
+    <text x="790" y="248" font-family="system-ui" font-size="14" font-weight="700" fill="#047857" text-anchor="middle">Bridges</text>
+    <text x="790" y="270" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">HF / vLLM / SGLang</text>
+    <text x="790" y="288" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">llama.cpp, OpenAI</text>
+    <text x="790" y="306" font-family="system-ui" font-size="11" fill="#475569" text-anchor="middle">diffusion, Instructor</text>
+  </g>
+
+  <!-- Down arrows from top row to bottom row -->
+  <line x1="100" y1="160" x2="130" y2="220" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <line x1="260" y1="160" x2="350" y2="220" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <line x1="420" y1="160" x2="570" y2="220" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <line x1="580" y1="160" x2="690" y2="220" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+  <line x1="740" y1="160" x2="790" y2="220" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" />
+
+  <!-- Legend -->
+  <rect x="30" y="355" width="840" height="40" rx="6" fill="#f8fafc" stroke="#e2e8f0" />
+  <text x="50" y="378" font-family="system-ui" font-size="12" fill="#475569">Python stays authoritative · Native is an accelerator with parity-tested fallback · Proof certificates ship with every verified instance</text>
+</svg>
