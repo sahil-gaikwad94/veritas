@@ -42,6 +42,7 @@ __all__ = [
     "numeric_prefix_or_none",
     "contract",
     "solve_linear",
+    "PyVocabularyTrie",
 ]
 
 _NATIVE: Any | None = None
@@ -297,3 +298,10 @@ def solve_linear(constraints: Sequence[dict]):
     if answer.get("status") == "unknown":
         return None
     return answer
+
+
+# Vocabulary trie for accelerated token masking (if native extension is available)
+if available():
+    PyVocabularyTrie = _NATIVE.PyVocabularyTrie
+else:
+    PyVocabularyTrie = None

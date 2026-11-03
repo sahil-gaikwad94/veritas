@@ -130,6 +130,7 @@ from .ltlf import (
     evaluate as evaluate_formula,
 )
 from .nano_solver import SolverStatus, VeritasNanoSolver
+from .native import PyVocabularyTrie
 from .pattern import PatternConstraint, UnsupportedPattern
 from .pattern import matches as pattern_matches
 from .pda import PushdownAutomaton
@@ -261,6 +262,7 @@ __all__ = [
     "__version__",
     "doctor",
     "native",
+    "PyVocabularyTrie",
     # authoring
     "verified_schema",
     "VerifiedSchema",

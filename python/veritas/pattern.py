@@ -78,10 +78,6 @@ class _Class:
         return not hit if self.negated else hit
 
 
-def _predicate(ch: str) -> bool:  # pragma: no cover - trivial
-    return True
-
-
 class _Nfa:
     """Thompson NFA.  States are indices; edges are ``None`` (epsilon) or a predicate."""
 
@@ -190,10 +186,7 @@ class _Builder:
             if av in (_sre_parse.AT_BOUNDARY, _sre_parse.AT_NON_BOUNDARY,
                       _sre_parse.AT_LOC_BOUNDARY, _sre_parse.AT_LOC_NON_BOUNDARY,
                       _sre_parse.AT_UNI_BOUNDARY, _sre_parse.AT_UNI_NON_BOUNDARY):
-                # Word boundaries (\b, \B) are context-dependent and cannot be
-                # decided purely from the prefix.  Reject them so callers fall
-                # back to length bounds plus the concrete verifier.
-                raise UnsupportedPattern(f"anchor {av!r} (word boundary) is not supported for masking")
+                raise UnsupportedPattern("word boundaries (\\b, \\B) are not supported for masking")
             if av in (_sre_parse.AT_LOCALE, _sre_parse.AT_MULTILINE, _sre_parse.AT_UNICODE):
                 # These are flag-setting pseudo-anchors; they don't consume input.
                 # We treat them as epsilon (no-op) since flags are handled at compile time.
@@ -321,17 +314,18 @@ class PatternConstraint:
             _entry=entry,
         )
 
-    # -- state -----------------------------------------------------------
+# -- state -----------------------------------------------------------
     def _step(self, state: PatternState, ch: str) -> PatternState:
         nfa = self._nfa
         assert nfa is not None
         seeds: set[int] = set()
+
         for current in state.states:
             for predicate, target in nfa.edges[current]:
                 if predicate is not None and predicate(ch):
                     seeds.add(target)
+
         if not self.start_anchored and not state.matched_any:
-            # An unanchored pattern may begin a fresh attempt at this position.
             seeds |= set(self._initial)
         if not seeds:
             return PatternState(frozenset(), state.matched_any, state.length + 1)
@@ -397,7 +391,9 @@ class PatternConstraint:
         frontier: list[tuple[PatternState, str]] = [(start, "")]
         # Length is part of the key: a length window (``minLength``) needs the search to
         # keep extending even after the automaton has reached a saturated state.
-        seen: set[tuple[frozenset[int], bool, int]] = {(start.states, start.matched_any, 0)}
+        seen: set[tuple[frozenset[int], bool, int]] = {
+            (start.states, start.matched_any, 0)
+        }
         nodes = 0
         floor = max(0, int(min_length))
         ceiling = max(floor, int(max_length))

@@ -80,6 +80,8 @@ class VirExpr:
     max_remaining: int = 0
     weights_vars: list[int] = field(default_factory=list)
     cholesky_l: list[list[float]] = field(default_factory=list)
+    cholesky_l_plus: list[list[float]] = field(default_factory=list)
+    cholesky_l_minus: list[list[float]] = field(default_factory=list)
     weight: float = 1.0
     tag: str = ""
 

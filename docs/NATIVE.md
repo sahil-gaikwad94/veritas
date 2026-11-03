@@ -59,8 +59,8 @@ Two call sites, both on the decode hot path:
   the interpreter cost lives (one automaton clone and step per vocabulary entry).
 * `Interval.from_numeric_prefix` — the numeric mask while a number is being typed.
 
-Exposed but **not** wired in: `native.contract` (HC4 revision) and `native.solve_linear`
-(exact feasibility). They are parity-tested and available to callers, but the decode engine
+Exposed but **not** wired in: `native.solve_linear`
+(exact feasibility). It is parity-tested and available to callers, but the decode engine
 uses its own stateful Python contractor, and the stateless wire call would cost more than it
 saves on the small systems the decoder contracts. Saying so is more useful than pretending the
 whole engine changed language.
@@ -79,6 +79,10 @@ the accelerator rather than guessing:
   translate, so Python callers only ever see floats (an empty domain arrives as
   `[inf, -inf]`). A round-trip property in `soundness.rs` pins the mapping bit for bit,
   including the intervals that are not numbers.
+  * Constraint kinds: `linear`, `sum`, `square`, `product`, `quadratic_form`
+  * `quadratic_form`: `{"kind": "quadratic_form", "vars": [u32], "cholesky_l": [[f64]], "rhs": f64, "op": "eq|le|..."}`
+    where `cholesky_l` is the lower-triangular Cholesky factor L (row-major, L[i][j] for j ≤ i)
+    of the PSD matrix A = LᵀL.
 * `solve_linear(constraints_json) -> {"status": "sat"|"unsat"|"unknown", ...}`
 * `engine_info() -> {"name", "version", "wire_version", "abi"}`
 

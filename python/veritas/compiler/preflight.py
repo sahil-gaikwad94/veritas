@@ -220,8 +220,10 @@ def run_preflight(spec: VirSpec) -> PreflightResult:
                                {"conflicting_constraint_indices": conflicts, "details": details, "hints": hints,
                                 "minimal": solver.core_is_minimal and not container_problems and not bound_problems,
                                 "suggestion": "Relax a listed constraint or a field bound."}, initial_domains(spec), details=details)
-    if status != SolverStatus.SAT:
+    if status == SolverStatus.UNKNOWN:
         return PreflightResult("UNKNOWN", details=[solver.unknown_reason or "unsupported constraints"], domains=initial_domains(spec))
+    if status == SolverStatus.UNSAT:
+        return PreflightResult("UNSAT", [], [], {"details": details}, initial_domains(spec), details=details)
     witness = solver.get_float_model()
     values = {spec.id_to_name[vid]: value for vid, value in witness.items() if vid in spec.id_to_name}
     # Integer declarations are not decided by the real relaxation. Try the rounded

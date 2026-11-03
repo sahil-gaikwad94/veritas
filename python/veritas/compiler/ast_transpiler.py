@@ -23,6 +23,72 @@ class TranspileError(ValueError):
     """A schema uses syntax outside the supported, checkable DSL."""
 
 
+def _extract_simple_bounds(expr: VirExpr) -> list[tuple[int, str, float, bool]]:
+    """Extract simple variable bounds from a require expression.
+    
+    Returns list of (var_id, op, value, exclusive) for constraints like:
+    - var >= value (op='ge', exclusive=False)
+    - var > value (op='gt', exclusive=True)
+    - var <= value (op='le', exclusive=False)
+    - var < value (op='lt', exclusive=True)
+    - var == value (op='eq', exclusive=False)
+    """
+    bounds = []
+    
+    def visit(node: VirExpr):
+        if node is None:
+            return
+        kind = getattr(node, "kind", None)
+        if kind == "and":
+            for arg in getattr(node, "args", []) or []:
+                visit(arg)
+        elif kind == "compare":
+            lhs = getattr(node, "lhs", None)
+            rhs = getattr(node, "rhs", None)
+            op = getattr(node, "op", "eq")
+            # Check if lhs is a var and rhs is a constant
+            if lhs is not None and getattr(lhs, "kind", None) == "var":
+                bound = _const_number(rhs)
+                if bound is not None:
+                    bounds.append((lhs.var_id, op, bound, op in ("gt", "lt")))
+            # Check if rhs is a var and lhs is a constant
+            elif rhs is not None and getattr(rhs, "kind", None) == "var":
+                bound = _const_number(lhs)
+                if bound is not None:
+                    # Flip the operator
+                    flipped = {"le": "ge", "lt": "gt", "ge": "le", "gt": "lt", "eq": "eq", "ne": "ne"}.get(op, op)
+                    bounds.append((rhs.var_id, flipped, bound, flipped in ("gt", "lt")))
+        # Recurse into other expression types that might contain compares
+        for child in (
+            getattr(node, "lhs", None),
+            getattr(node, "rhs", None),
+            getattr(node, "predicate", None),
+            getattr(node, "iterable", None),
+        ):
+            visit(child)
+        for arg in getattr(node, "args", []) or []:
+            visit(arg)
+    
+    visit(expr)
+    return bounds
+
+
+def _const_number(expr: VirExpr | None) -> float | None:
+    if expr is None:
+        return None
+    if getattr(expr, "kind", None) in ("const_real", "const_int"):
+        try:
+            return float(expr.value)
+        except (TypeError, ValueError):
+            return None
+    if getattr(expr, "kind", None) == "const_value" and isinstance(expr.value, (int, float)) and not isinstance(expr.value, bool):
+        return float(expr.value)
+    if getattr(expr, "kind", None) == "neg":
+        inner = _const_number(getattr(expr, "lhs", None))
+        return -inner if inner is not None else None
+    return None
+
+
 class AstTranspiler:
     _CALLS = {"require", "derive", "prefer", "forall", "sum", "dot", "quad_form", "sqrt", "keys_subset"}
     _BUILTINS = {"abs": builtins.abs, "min": builtins.min, "max": builtins.max,
@@ -83,6 +149,11 @@ class AstTranspiler:
         node = matches[0]
         if isinstance(node, ast.AsyncFunctionDef):
             self._error(node, "schema declarations must be synchronous")
+        
+        # Pass 1: Extract simple bounds from require() calls to propagate to variable types
+        self._collect_and_apply_bounds(node)
+        
+        # Pass 2: Full transpilation
         for stmt in node.body:
             if isinstance(stmt, ast.Pass):
                 continue
@@ -104,6 +175,50 @@ class AstTranspiler:
         )
         spec.containers = analyze_containers(spec)
         return spec
+
+    def _collect_and_apply_bounds(self, node: ast.AST) -> None:
+        """First pass: extract simple variable bounds from require() calls and apply to variable types."""
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+                continue
+            call = stmt.value
+            dsl_name = self._dsl_name(call)
+            if dsl_name != "require":
+                continue
+            # Parse the argument to extract simple bounds
+            arg = call.args[0] if call.args else None
+            if arg is None:
+                continue
+            # Parse the expression to VirExpr
+            expr = self.parse_expr(arg)
+            # Extract simple bounds
+            bounds = _extract_simple_bounds(expr)
+            # Apply bounds to variable types
+            for var_id, op, value, exclusive in bounds:
+                info = self.var_table.get(var_id)
+                if info is None:
+                    continue
+                vtype = info["type"]
+                if op in ("ge", "gt"):
+                    current = getattr(vtype, "min", None)
+                    if current is None or value > current:
+                        vtype.min = value
+                        vtype.min_exclusive = exclusive
+                    elif value == current and exclusive:
+                        vtype.min_exclusive = True
+                elif op in ("le", "lt"):
+                    current = getattr(vtype, "max", None)
+                    if current is None or value < current:
+                        vtype.max = value
+                        vtype.max_exclusive = exclusive
+                    elif value == current and exclusive:
+                        vtype.max_exclusive = True
+                elif op == "eq":
+                    # Pin to exact value
+                    vtype.min = value
+                    vtype.max = value
+                    vtype.min_exclusive = False
+                    vtype.max_exclusive = False
 
     def _resolve(self, node):
         if isinstance(node, ast.Name):
@@ -229,14 +344,34 @@ class AstTranspiler:
                     return VirExpr(kind="forall", iterable=self.parse_expr(node.args[0]), predicate=pred)
                 args = [self.parse_expr(a) for a in node.args]
                 if name == "quad_form":
-                    from ..cartridges.quant import cholesky, covariance_labels, covariance_matrix
+                    from ..cartridges.quant import (
+                        cholesky,
+                        cholesky_with_jitter,
+                        covariance_labels,
+                        covariance_matrix,
+                        eigendecomposition_split,
+                    )
                     cov = self._resolve_constant(node.args[1])
                     if not isinstance(cov, dict):
                         self._error(node, "quad_form covariance must be a constant mapping")
                     labels = covariance_labels(cov)
-                    factor = cholesky(covariance_matrix(labels, cov))
+                    matrix = covariance_matrix(labels, cov)
+                    factor = cholesky_with_jitter(matrix)
                     if factor is None:
-                        self._error(node, "covariance must be symmetric positive definite")
+                        # Non-PSD matrix: split into Q+ - Q- via eigendecomposition
+                        q_plus, q_minus = eigendecomposition_split(matrix)
+                        factor_plus = cholesky(q_plus)
+                        factor_minus = cholesky(q_minus)
+                        if factor_plus is None or factor_minus is None:
+                            self._error(node, "covariance eigendecomposition failed")
+                        # Return a special marker for split quadratic form
+                        return VirExpr(
+                            kind="quad_form_split",
+                            args=args,
+                            value=cov,
+                            cholesky_l_plus=factor_plus,
+                            cholesky_l_minus=factor_minus,
+                        )
                     return VirExpr(kind="quad_form_cholesky", args=args, value=cov, cholesky_l=factor)
                 if name in {"dot", "keys_subset"}:
                     return VirExpr(kind="quad_form_cholesky" if name == "quad_form" else name,

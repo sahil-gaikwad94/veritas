@@ -14,18 +14,123 @@ from dataclasses import dataclass, field
 
 VALENCE: dict[str, tuple[int, ...]] = {
     "H": (1,),
+    "He": (0,),
+    "Li": (1,),
+    "Be": (2,),
     "B": (3,),
     "C": (4,),
     "N": (3, 5),
     "O": (2,),
     "F": (1,),
+    "Ne": (0,),
+    "Na": (1,),
+    "Mg": (2,),
+    "Al": (3,),
     "Si": (4,),
     "P": (3, 5),
     "S": (2, 4, 6),
     "Cl": (1,),
-    "Br": (1,),
-    "I": (1,),
+    "Ar": (0,),
+    "K": (1,),
+    "Ca": (2,),
+    "Sc": (3,),
+    "Ti": (2, 3, 4),
+    "V": (2, 3, 4, 5),
+    "Cr": (2, 3, 6),
+    "Mn": (2, 3, 4, 7),
+    "Fe": (2, 3, 6),
+    "Co": (2, 3),
+    "Ni": (2, 3),
+    "Cu": (1, 2),
+    "Zn": (2,),
+    "Ga": (3,),
+    "Ge": (4,),
+    "As": (3, 5),
     "Se": (2, 4, 6),
+    "Br": (1,),
+    "Kr": (0,),
+    "Rb": (1,),
+    "Sr": (2,),
+    "Y": (3,),
+    "Zr": (4,),
+    "Nb": (3, 5),
+    "Mo": (2, 3, 4, 6),
+    "Tc": (4, 7),
+    "Ru": (2, 3, 4, 8),
+    "Rh": (3,),
+    "Pd": (2, 4),
+    "Ag": (1,),
+    "Cd": (2,),
+    "In": (3,),
+    "Sn": (2, 4),
+    "Sb": (3, 5),
+    "Te": (2, 4, 6),
+    "I": (1,),
+    "Xe": (0,),
+    "Cs": (1,),
+    "Ba": (2,),
+    "La": (3,),
+    "Ce": (3, 4),
+    "Pr": (3,),
+    "Nd": (3,),
+    "Pm": (3,),
+    "Sm": (2, 3),
+    "Eu": (2, 3),
+    "Gd": (3,),
+    "Tb": (3, 4),
+    "Dy": (3,),
+    "Ho": (3,),
+    "Er": (3,),
+    "Tm": (2, 3),
+    "Yb": (2, 3),
+    "Lu": (3,),
+    "Hf": (4,),
+    "Ta": (5,),
+    "W": (4, 6),
+    "Re": (4, 7),
+    "Os": (4, 8),
+    "Ir": (3, 4),
+    "Pt": (2, 4),
+    "Au": (1, 3),
+    "Hg": (1, 2),
+    "Tl": (1, 3),
+    "Pb": (2, 4),
+    "Bi": (3, 5),
+    "Po": (2, 4, 6),
+    "At": (1,),
+    "Rn": (0,),
+    "Fr": (1,),
+    "Ra": (2,),
+    "Ac": (3,),
+    "Th": (4,),
+    "Pa": (5,),
+    "U": (3, 4, 6),
+    "Np": (3, 4, 5, 6),
+    "Pu": (3, 4, 5, 6),
+    "Am": (3,),
+    "Cm": (3,),
+    "Bk": (3, 4),
+    "Cf": (3,),
+    "Es": (3,),
+    "Fm": (3,),
+    "Md": (3,),
+    "No": (2, 3),
+    "Lr": (3,),
+    "Rf": (4,),
+    "Db": (5,),
+    "Sg": (6,),
+    "Bh": (7,),
+    "Hs": (8,),
+    "Mt": (1,),
+    "Ds": (2,),
+    "Rg": (1,),
+    "Cn": (2,),
+    "Nh": (1,),
+    "Fl": (2,),
+    "Mc": (1,),
+    "Lv": (2,),
+    "Ts": (1,),
+    "Og": (0,),
 }
 AROMATIC_VALENCE: dict[str, tuple[int, ...]] = {
     "c": (3,),
@@ -34,11 +139,22 @@ AROMATIC_VALENCE: dict[str, tuple[int, ...]] = {
     "p": (3,),
     "s": (2,),
     "b": (3,),
+    "se": (2,),
+    "as": (3,),
 }
 ATOMIC_WEIGHT = {
-    "H": 1.008, "B": 10.81, "C": 12.011, "N": 14.007, "O": 15.999, "F": 18.998,
-    "Na": 22.990, "Mg": 24.305, "Si": 28.085, "P": 30.974, "S": 32.06, "Cl": 35.45,
-    "K": 39.098, "Ca": 40.078, "Fe": 55.845, "Br": 79.904, "I": 126.904, "Se": 78.971,
+    "H": 1.008, "He": 4.0026, "Li": 6.94, "Be": 9.0122, "B": 10.81, "C": 12.011, "N": 14.007, "O": 15.999, "F": 18.998, "Ne": 20.180,
+    "Na": 22.990, "Mg": 24.305, "Al": 26.982, "Si": 28.085, "P": 30.974, "S": 32.06, "Cl": 35.45, "Ar": 39.948, "K": 39.098, "Ca": 40.078,
+    "Sc": 44.956, "Ti": 47.867, "V": 50.942, "Cr": 51.996, "Mn": 54.938, "Fe": 55.845, "Co": 58.933, "Ni": 58.693, "Cu": 63.546, "Zn": 65.38,
+    "Ga": 69.723, "Ge": 72.630, "As": 74.922, "Se": 78.971, "Br": 79.904, "Kr": 83.798, "Rb": 85.468, "Sr": 87.62, "Y": 88.906, "Zr": 91.224,
+    "Nb": 92.906, "Mo": 95.95, "Tc": 98, "Ru": 101.07, "Rh": 102.91, "Pd": 106.42, "Ag": 107.87, "Cd": 112.41, "In": 114.82, "Sn": 118.71,
+    "Sb": 121.76, "Te": 127.60, "I": 126.904, "Xe": 131.29, "Cs": 132.91, "Ba": 137.33, "La": 138.91, "Ce": 140.12, "Pr": 140.91, "Nd": 144.24,
+    "Pm": 145, "Sm": 150.36, "Eu": 151.96, "Gd": 157.25, "Tb": 158.93, "Dy": 162.50, "Ho": 164.93, "Er": 167.26, "Tm": 168.93, "Yb": 173.05,
+    "Lu": 174.97, "Hf": 178.49, "Ta": 180.95, "W": 183.84, "Re": 186.21, "Os": 190.23, "Ir": 192.22, "Pt": 195.08, "Au": 196.97, "Hg": 200.59,
+    "Tl": 204.38, "Pb": 207.2, "Bi": 208.98, "Po": 209, "At": 210, "Rn": 222, "Fr": 223, "Ra": 226, "Ac": 227, "Th": 232.04,
+    "Pa": 231.04, "U": 238.03, "Np": 237, "Pu": 244, "Am": 243, "Cm": 247, "Bk": 247, "Cf": 251, "Es": 252, "Fm": 257, "Md": 258,
+    "No": 259, "Lr": 262, "Rf": 267, "Db": 268, "Sg": 269, "Bh": 270, "Hs": 277, "Mt": 276, "Ds": 281, "Rg": 280, "Cn": 285,
+    "Nh": 284, "Fl": 289, "Mc": 288, "Lv": 293, "Ts": 294, "Og": 294,
 }
 
 _BRACKET_RE = re.compile(
@@ -98,6 +214,17 @@ class SmilesAnalysis:
         }
 
 
+# All 118 element symbols (two-letter and one-letter)
+_ELEMENT_SYMBOLS_2 = frozenset({
+    "He", "Li", "Be", "Ne", "Na", "Mg", "Al", "Si", "Cl", "Ar", "Ca", "Sc", "Ti", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+    "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
+    "In", "Sn", "Sb", "Te", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er",
+    "Tm", "Yb", "Lu", "Hf", "Ta", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra",
+    "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh",
+    "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og",
+})
+_ELEMENT_SYMBOLS_1 = frozenset("BCNOPSFIHKVYIWU")  # Single-letter symbols that can appear alone
+
 def _tokenize(smiles: str) -> list[str]:
     tokens: list[str] = []
     i = 0
@@ -123,15 +250,20 @@ def _tokenize(smiles: str) -> list[str]:
             tokens.append(ch)
             i += 1
             continue
-        if smiles.startswith(("Cl", "Br"), i):
-            tokens.append(smiles[i:i + 2])
-            i += 2
-            continue
-        if ch in "BCNOPSFI":
+        # Check for two-letter element symbols first
+        if i + 1 < len(smiles):
+            two_char = smiles[i:i+2]
+            if two_char in _ELEMENT_SYMBOLS_2:
+                tokens.append(two_char)
+                i += 2
+                continue
+        # Single-letter element symbols (uppercase)
+        if ch in _ELEMENT_SYMBOLS_1:
             tokens.append(ch)
             i += 1
             continue
-        if ch in "bcnops":
+        # Aromatic (lowercase) symbols
+        if ch in "bcnopsseas":
             tokens.append(ch)
             i += 1
             continue

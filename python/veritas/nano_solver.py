@@ -184,7 +184,7 @@ class VeritasNanoSolver:
     def _eliminate(self, rows, variables, deadline):
         rows = list(rows)
         stages = []
-        for var in variables:
+        for k, var in enumerate(variables):
             if deadline is not None and time.monotonic() >= deadline:
                 return None
             pos = [r for r in rows if r.coeffs.get(var, 0) > 0]
@@ -204,7 +204,16 @@ class VeritasNanoSolver:
                     combined.append(self._normalize(coeffs, a * n.rhs + b * p.rhs,
                                                     p.strict or n.strict, p.sources | n.sources))
             unique = {}
+            # Kohler's redundant-inequality pruning:
+            # After eliminating m variables, any row whose source set has cardinality > m + 1
+            # is a redundant combination and can be dropped.
+            # At iteration k (0-indexed), we have eliminated k variables before this iteration,
+            # and are eliminating the (k+1)-th variable. After this, m = k+1 variables eliminated.
+            max_sources = k + 2
             for row in zero + combined:
+                # Prune redundant rows
+                if len(row.sources) > max_sources:
+                    continue
                 key = (tuple(sorted(((repr(k), k, v) for k, v in row.coeffs.items()))), row.rhs, row.strict)
                 if key in unique:
                     old = unique[key]

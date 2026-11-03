@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 use veritas_core::contractor::Contractor;
 use veritas_core::interval::Interval;
-use veritas_core::json::{self, Json, Prefix};
+use veritas_core::json::{self, Json, Prefix, VocabularyTrie};
 use veritas_core::num::Rational;
 use veritas_core::pda::Pda;
 use veritas_core::solver::{self, Linear, Outcome};
@@ -57,6 +57,38 @@ fn document_value(text: &str) -> PyResult<String> {
 #[pyo3(signature = (prefix, vocabulary, eos=None))]
 fn allowed_tokens(prefix: &str, vocabulary: Vec<String>, eos: Option<String>) -> Vec<u32> {
     json::mask(prefix, &vocabulary, eos.as_deref())
+}
+
+/// Vocabulary trie for accelerated token masking.
+/// Build once per tokenizer vocabulary, then reuse for fast mask queries.
+#[pyclass]
+struct PyVocabularyTrie {
+    inner: VocabularyTrie,
+}
+
+#[pymethods]
+impl PyVocabularyTrie {
+    #[new]
+    #[pyo3(signature = (vocabulary, eos=None))]
+    fn new(vocabulary: Vec<String>, eos: Option<String>) -> PyResult<Self> {
+        if vocabulary.is_empty() {
+            return Err(PyValueError::new_err("vocabulary must not be empty"));
+        }
+        let trie = VocabularyTrie::new(&vocabulary, eos.as_deref())
+            .ok_or_else(|| PyValueError::new_err("failed to build vocabulary trie"))?;
+        Ok(PyVocabularyTrie { inner: trie })
+    }
+    
+    /// Get all token indices that have `prefix` as a prefix.
+    fn tokens_with_prefix(&self, prefix: &str) -> Vec<u32> {
+        self.inner.tokens_with_prefix(prefix)
+    }
+    
+    /// Fast mask using the trie.
+    #[pyo3(signature = (prefix, vocabulary, eos=None))]
+    fn mask(&self, prefix: &str, vocabulary: Vec<String>, eos: Option<String>) -> Vec<u32> {
+        self.inner.mask(prefix, &vocabulary, eos.as_deref())
+    }
 }
 
 #[pyfunction]
@@ -206,5 +238,6 @@ fn veritas_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_linear_exact, m)?)?;
     m.add_function(wrap_pyfunction!(engine_info, m)?)?;
     m.add_class::<PdaHandle>()?;
+    m.add_class::<PyVocabularyTrie>()?;
     Ok(())
 }
