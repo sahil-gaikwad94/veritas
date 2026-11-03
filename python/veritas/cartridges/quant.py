@@ -55,7 +55,7 @@ def quad_form(weights: Mapping[str, float], cov: Mapping[Any, float]) -> float:
     return total
 
 
-def cholesky(matrix: Sequence[Sequence[float]]) -> list[list[float]] | None:
+def cholesky(matrix: Sequence[Sequence[float]], jitter: float = 1e-12) -> list[list[float]] | None:
     n = len(matrix)
     lower = [[0.0] * n for _ in range(n)]
     for i in range(n):
@@ -63,14 +63,44 @@ def cholesky(matrix: Sequence[Sequence[float]]) -> list[list[float]] | None:
             total = sum(lower[i][k] * lower[j][k] for k in range(j))
             if i == j:
                 value = matrix[i][i] - total
+                # Tikhonov jitter for near-PSD matrices
                 if value <= 0:
-                    return None
+                    if value > -jitter:
+                        value = jitter
+                    else:
+                        return None
                 lower[i][j] = math.sqrt(value)
             else:
                 if lower[j][j] == 0:
                     return None
                 lower[i][j] = (matrix[i][j] - total) / lower[j][j]
     return lower
+
+
+def cholesky_with_jitter(matrix: Sequence[Sequence[float]], jitter: float = 1e-12) -> list[list[float]] | None:
+    """Cholesky with Tikhonov jitter for near-PSD matrices."""
+    return cholesky(matrix, jitter)
+
+
+def eigendecomposition_split(matrix: Sequence[Sequence[float]]) -> tuple[list[list[float]], list[list[float]]]:
+    """Split symmetric matrix into positive and negative semidefinite parts via eigendecomposition.
+    
+    Returns (Q_plus, Q_minus) where matrix = Q_plus - Q_minus, both PSD.
+    Uses power iteration for simplicity (for small matrices in contractor).
+    """
+    import numpy as np
+    a = np.array(matrix, dtype=np.float64)
+    if a.shape[0] != a.shape[1]:
+        raise ValueError("Matrix must be square")
+    # Ensure symmetric
+    a = (a + a.T) / 2
+    eigenvalues, eigenvectors = np.linalg.eigh(a)
+    # Split into positive and negative parts
+    pos_evals = np.maximum(eigenvalues, 0)
+    neg_evals = np.maximum(-eigenvalues, 0)
+    q_plus = eigenvectors @ np.diag(pos_evals) @ eigenvectors.T
+    q_minus = eigenvectors @ np.diag(neg_evals) @ eigenvectors.T
+    return q_plus.tolist(), q_minus.tolist()
 
 
 def is_positive_semidefinite(matrix: Sequence[Sequence[float]], tol: float = 1e-9) -> bool:

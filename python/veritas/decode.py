@@ -94,6 +94,8 @@ class DecodeConfig:
     #: If True, automatically compute integer/fraction digit limits from field bounds
     #: when the configured limits would be too restrictive.
     auto_scale_numeric_limits: bool = True
+    #: Default numeric tolerance for cartridge validators and constraint checks.
+    numeric_tolerance: float = 1e-9
 
 
 @dataclass
@@ -351,41 +353,50 @@ class VeritasSession:
                     contractor.add_constraint(("linear", dict(coeffs), float(rhs), op))
                 except Exception:
                     continue
-            # Also check for quadratic form constraints (quad_form_cholesky)
+            # Also check for quadratic form constraints (quad_form_cholesky and quad_form_split)
             expr = clause.expr
-            if getattr(expr, "kind", None) == "quad_form_cholesky":
+            if getattr(expr, "kind", None) in ("quad_form_cholesky", "quad_form_split"):
                 # Extract variable IDs from the args (weights)
                 var_ids = []
                 for arg in getattr(expr, "args", []) or []:
                     if getattr(arg, "kind", None) == "var":
                         var_ids.append(arg.var_id)
                 if var_ids and all(vid in contractor.domains for vid in var_ids):
-                    cholesky_l = getattr(expr, "cholesky_l", None)
-                    if cholesky_l is not None and len(cholesky_l) == len(var_ids):
-                        # Validate lower triangular structure
-                        valid = True
-                        for i, row in enumerate(cholesky_l):
-                            if len(row) != i + 1:
-                                valid = False
-                                break
-                        if valid:
-                            rhs_val = getattr(clause, "comparison", None)
-                            if rhs_val is not None:
-                                op, _zero, _tol = rhs_val
-                                # Get rhs from the comparison
-                                rhs_expr = expr.rhs if hasattr(expr, "rhs") else None
-                                if rhs_expr is not None and hasattr(rhs_expr, "value"):
-                                    rhs = float(rhs_expr.value)
-                                else:
-                                    # Try to get from comparison
-                                    rhs = 0.0
-                                try:
-                                    contractor.add_constraint((
-                                        "quadratic_form",
-                                        {"vars": var_ids, "cholesky_l": cholesky_l, "rhs": rhs, "op": op}
-                                    ))
-                                except Exception:
-                                    continue
+                    kind = getattr(expr, "kind", None)
+                    if kind == "quad_form_cholesky":
+                        cholesky_factors = [(getattr(expr, "cholesky_l", None), 1.0)]
+                    else:  # quad_form_split
+                        cholesky_factors = [
+                            (getattr(expr, "cholesky_l_plus", None), 1.0),
+                            (getattr(expr, "cholesky_l_minus", None), -1.0),
+                        ]
+                    
+                    for cholesky_l, sign in cholesky_factors:
+                        if cholesky_l is not None and len(cholesky_l) == len(var_ids):
+                            # Validate lower triangular structure
+                            valid = True
+                            for i, row in enumerate(cholesky_l):
+                                if len(row) != i + 1:
+                                    valid = False
+                                    break
+                            if valid:
+                                rhs_val = getattr(clause, "comparison", None)
+                                if rhs_val is not None:
+                                    op, _zero, _tol = rhs_val
+                                    # Get rhs from the comparison
+                                    rhs_expr = expr.rhs if hasattr(expr, "rhs") else None
+                                    if rhs_expr is not None and hasattr(rhs_expr, "value"):
+                                        rhs = float(rhs_expr.value)
+                                    else:
+                                        # Try to get from comparison
+                                        rhs = 0.0
+                                    try:
+                                        contractor.add_constraint((
+                                            "quadratic_form",
+                                            {"vars": var_ids, "cholesky_l": cholesky_l, "rhs": sign * rhs, "op": op}
+                                        ))
+                                    except Exception:
+                                        continue
         contractor.propagate()
         return contractor
 

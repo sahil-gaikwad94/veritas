@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 use veritas_core::json::{self, Json, Prefix};
 use veritas_core::pda::Pda;
 use veritas_core::solver;
+use veritas_core::wire;
 
 #[wasm_bindgen]
 pub fn version() -> String {
@@ -43,6 +44,22 @@ pub fn numeric_prefix(text: &str, lo: f64, hi: f64, allow_exp: bool) -> Vec<f64>
         vec![f64::INFINITY, f64::NEG_INFINITY]
     } else {
         vec![span.lo, span.hi]
+    }
+}
+
+#[wasm_bindgen]
+pub fn contract(domains_json: &str, constraints_json: &str, rounds: usize) -> String {
+    let domains = match json::parse(domains_json) {
+        Ok(node) => node,
+        Err(error) => return failure(&error.to_string()),
+    };
+    let constraints = match json::parse(constraints_json) {
+        Ok(node) => node,
+        Err(error) => return failure(&error.to_string()),
+    };
+    match wire::run_contractor(&domains, &constraints, rounds) {
+        Ok((contractor, refuted)) => wire::contractor_json(&contractor, refuted).render(),
+        Err(error) => failure(&error),
     }
 }
 

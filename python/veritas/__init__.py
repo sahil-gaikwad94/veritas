@@ -22,6 +22,7 @@ __version__ = "2.0.0"
 
 # --- authoring layer -------------------------------------------------------
 from .cartridges.sec import WorldState
+from .native import PyVocabularyTrie
 
 # --- jump-forward / backtracking -----------------------------------------
 from .cdcl_jumpback import (
@@ -261,6 +262,7 @@ __all__ = [
     "__version__",
     "doctor",
     "native",
+    "PyVocabularyTrie",
     # authoring
     "verified_schema",
     "VerifiedSchema",
