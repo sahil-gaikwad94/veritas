@@ -22,7 +22,6 @@ __version__ = "2.0.0"
 
 # --- authoring layer -------------------------------------------------------
 from .cartridges.sec import WorldState
-from .native import PyVocabularyTrie
 
 # --- jump-forward / backtracking -----------------------------------------
 from .cdcl_jumpback import (
@@ -131,6 +130,7 @@ from .ltlf import (
     evaluate as evaluate_formula,
 )
 from .nano_solver import SolverStatus, VeritasNanoSolver
+from .native import PyVocabularyTrie
 from .pattern import PatternConstraint, UnsupportedPattern
 from .pattern import matches as pattern_matches
 from .pda import PushdownAutomaton

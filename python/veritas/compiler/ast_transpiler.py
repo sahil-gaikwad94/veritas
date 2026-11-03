@@ -344,7 +344,13 @@ class AstTranspiler:
                     return VirExpr(kind="forall", iterable=self.parse_expr(node.args[0]), predicate=pred)
                 args = [self.parse_expr(a) for a in node.args]
                 if name == "quad_form":
-                    from ..cartridges.quant import cholesky, cholesky_with_jitter, eigendecomposition_split, covariance_labels, covariance_matrix
+                    from ..cartridges.quant import (
+                        cholesky,
+                        cholesky_with_jitter,
+                        covariance_labels,
+                        covariance_matrix,
+                        eigendecomposition_split,
+                    )
                     cov = self._resolve_constant(node.args[1])
                     if not isinstance(cov, dict):
                         self._error(node, "quad_form covariance must be a constant mapping")
