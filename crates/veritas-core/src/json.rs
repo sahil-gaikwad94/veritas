@@ -15,7 +15,7 @@
 //! anything this module reports as [`Prefix::Invalid`] *and* the native mask is used only as
 //! an accelerator (see `python/veritas/native.py`).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Json {
@@ -269,7 +269,8 @@ pub struct VocabularyTrie {
     token_bytes: Vec<Vec<u8>>,
     /// EOS token index if any
     eos_token: Option<usize>,
-    /// EOS token byte sequence if any
+    /// EOS token byte sequence if any (reserved for future use)
+    #[allow(dead_code)]
     eos_bytes: Option<Vec<u8>>,
 }
 
@@ -374,7 +375,7 @@ impl VocabularyTrie {
     /// This is the main entry point for accelerated masking.
     pub fn mask(&self, prefix: &str, vocabulary: &[String], eos: Option<&str>) -> Vec<u32> {
         // Get candidate token indices from the trie
-        let mut candidates = self.tokens_with_prefix(prefix);
+        let candidates = self.tokens_with_prefix(prefix);
         
         // Check each candidate with the full prefix_status
         let mut allowed = Vec::new();
