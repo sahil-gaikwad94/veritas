@@ -68,19 +68,19 @@ class UntrustedString(str):
     firewall re-attaches for argument mappings at the model boundary.
     """
 
-    def __new__(cls, value: str, sources: Sequence[str] | None = None) -> "UntrustedString":
+    def __new__(cls, value: str, sources: Sequence[str] | None = None) -> UntrustedString:
         instance = str.__new__(cls, str(value))
         instance.sources = frozenset(sources or ("untrusted",))
         return instance
 
-    def tag(self, source: str) -> "UntrustedString":
+    def tag(self, source: str) -> UntrustedString:
         return UntrustedString(self, (*self.sources, source))
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source: Any, handler: Any):
         from pydantic_core import core_schema
 
-        def _validate(value: Any) -> "UntrustedString":
+        def _validate(value: Any) -> UntrustedString:
             if isinstance(value, UntrustedString):
                 return value
             return UntrustedString(str(value))

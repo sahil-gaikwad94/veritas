@@ -81,7 +81,41 @@ The result: structured generation that cannot lie, with an audit trail you can f
 | 🦀 **Rust accelerator** | `crates/veritas-core` — dependency-free, 17.9x faster token masking, pure-Python fallback on every call. |
 | 🔌 **Model bridges** | HF / vLLM / SGLang / llama.cpp logits processors, async stream proxy, Gumbel-max diffusion, OpenAI/Instructor proxy. |
 | 🧩 **Domain cartridges** | `quant`, `sql`, `sec`, `or_sched`, `stat`, `phys`, `chem`, `code` — deterministic reference checks, no mandatory NumPy/z3/SymPy. |
-| 🖥️ **CLI** | `check-spec`, `verify`, `verify-proof`, `inspect`, `synth`, `doctor` — compile, verify, prove, and diagnose from the terminal. |
+| 🖥️ **CLI** | `check-spec`, `verify`, `verify-proof`, `inspect`, `synth`, `doctor`, `export-rl`, `explain-unsat`, `serve` — compile, verify, prove, and diagnose from the terminal. |
+| 🧮 **KL-distortion receipts** | `result.receipt()` — per-field KL divergence introduced by masking (`-log(accepted probability mass)`), content hashes and budget counters. |
+| 🪪 **MCP firewall** | `vt.VeritasMcpSession` / `@verified_tool` — LTLf temporal masking of tool picks, symbolic env binding (`last_*`), spend caps, taint tracking on untrusted strings. |
+| 🧪 **Minimal relaxation wizard** | `veritas explain-unsat` — pinpoints the minimal single-clause widening/raising or proves the conflict is structural. |
+| 🚆 **TRL export** | `veritas export-rl` — decoder traces → DPO/GRPO JSONL with SHA-256 manifests for local fine-tuning. |
+| 🧱 **Reverse proxy** | `veritas serve` — OpenAI-compatible `/v1/chat/completions` in front of an upstream; non-streaming responses are re-verified (422 on violation), streaming responses carry a `veritas_certificate`. |
+
+---
+
+## 🆕 Veritas 1.5 in 30 seconds
+
+```python
+import veritas as vt
+
+# 1. Re-verified receipts: per-field KL distortion + content hashes
+result = vt.generate(model=model, prompt="port", spec=portfolio)
+print(result.receipt())
+# {'sha256': ..., 'status': 'PASS', 'field_kl_divergence': {'weight_a': 3.47, ...}, ...}
+
+# 2. The MCP firewall for agent tool calls
+session = vt.VeritasMcpSession(temporal_policy=vt.before("lookup_order", "issue_refund"))
+
+@session.verified_tool(name="issue_refund", requires_taint_free=True)
+def issue_refund(args, state):
+    # Later tool arguments see earlier tool outputs as symbolic bounds.
+    vt.mcp.mcp_require(args.refund_amount <= state.env["last_order_total"])
+    return {"refunded": args.refund_amount}
+
+# 3. Terminal tooling
+#   veritas explain-unsat schema.py   # minimal slack that repairs an UNSAT spec
+#   veritas export-rl traces.jsonl --format dpo -o train.jsonl
+#   veritas serve --upstream http://localhost:11434/v1 --spec-module schemas.py --port 8080
+```
+
+Full notes: [docs/1.5-release.md](docs/1.5-release.md).
 
 ---
 
@@ -427,6 +461,19 @@ python -m veritas check-spec generated_schema.py
 python -m veritas doctor           # human-readable
 python -m veritas doctor --json    # for a bug report
 python -m veritas doctor --strict  # exit 1 unless the native extension is loaded
+
+# Minimal repair for an infeasible spec: per-clause minimal slack, or "structural".
+python -m veritas explain-unsat schema.py [--json]
+
+# Export decoder traces as TRL-ready preference data (DPO or GRPO).
+python -m veritas export-rl traces.jsonl --format dpo -o train_dpo.jsonl
+python -m veritas export-rl traces.jsonl --format grpo -o train_grpo.jsonl
+
+# OpenAI-compatible verification reverse proxy for structured outputs.
+veritas serve --upstream http://127.0.0.1:11434/v1 --spec-module schemas.py --spec portfolio --port 8080
+
+# Trace capture: DecodeConfig(rl_trace_path="traces.jsonl") persists conflict-branch
+# records (with the repaired completion attached once the run verifies).
 ```
 
 `--from-doc` is deliberately explicit about requiring a model adapter rather than pretending
@@ -440,15 +487,16 @@ to infer from prose.
 PYTHONPATH=python .venv/bin/python -m pytest tests/ -q
 ```
 
-Current status: **378 passed, 41 skipped** in the default install (compiler, preflight,
-instance verification, JSON PDA, token healing, decode engine, pattern masking, numeric
-search, structural diagnostics, proofs, cartridges, bridges, LTLf/RL and CLI end-to-end).
-The 41 skips are the native/pure-Python parity corpus, the kill-switch tests that need a live
-engine, and the randomized differential sweep in `tests/test_native_backend.py`; with the
-extension built they run, so the whole suite is **419 passed, 0 skipped** *and* every other
-test then exercises the native masks and numeric prefixes.
+Current status: **425 passed, 41 skipped** in the default install (compiler, preflight,
+instance verification, JSON PDA, token healing, decode engine, pattern masking (including
+word-boundary assertions), numeric search, structural diagnostics, proofs, cartridges,
+bridges, LTLf/RL, the MCP firewall, receipts, explain-unsat, export-rl and CLI/proxy
+end-to-end). The 41 skips are the native/pure-Python parity corpus, the kill-switch tests
+that need a live engine, and the randomized differential sweep in `tests/test_native_backend.py`;
+with the extension built they run, so the whole suite is **466 passed, 0 skipped** *and*
+every other test then exercises the native masks and numeric prefixes.
 
-The Rust engine has its own 68 unit tests plus 12 property tests
+The Rust engine has its own 69 unit tests plus 12 property tests
 (`crates/veritas-core/tests/soundness.rs`) that refutes randomized constraints against a
 brute-force grid, re-checks every UNSAT core standalone and cross-checks the automaton against
 the prefix classifier. CI runs:

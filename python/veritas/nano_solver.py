@@ -204,21 +204,26 @@ class VeritasNanoSolver:
                     combined.append(self._normalize(coeffs, a * n.rhs + b * p.rhs,
                                                     p.strict or n.strict, p.sources | n.sources))
             unique = {}
-            # Kohler's redundant-inequality pruning:
-            # After eliminating m variables, any row whose source set has cardinality > m + 1
-            # is a redundant combination and can be dropped.
-            # At iteration k (0-indexed), we have eliminated k variables before this iteration,
-            # and are eliminating the (k+1)-th variable. After this, m = k+1 variables eliminated.
-            max_sources = k + 2
+            # Redundant-inequality elimination by *subsumption*: rows are kept in
+            # sign-normalized buckets; within a bucket only the strongest bound survives.
+            # Subsumption is sound (the dropped row is implied by the kept one), unlike a
+            # lineage-size threshold, which can drop the only contradictory combination and
+            # has been demonstrated to flip UNSAT to SAT. Constant rows are kept too, since
+            # the final contradiction is read off them.
             for row in zero + combined:
-                # Prune redundant rows
-                if len(row.sources) > max_sources:
-                    continue
-                key = (tuple(sorted(((repr(k), k, v) for k, v in row.coeffs.items()))), row.rhs, row.strict)
-                if key in unique:
-                    old = unique[key]
-                    row = _Row(row.coeffs, row.rhs, row.strict, old.sources | row.sources)
-                unique[key] = row
+                if not row.coeffs:
+                    # Constant row: keep the tightest one (it carries the contradiction).
+                    key = ()
+                else:
+                    key = tuple(sorted(((repr(k), k, v) for k, v in row.coeffs.items())))
+                current = unique.get(key)
+                if current is None or (row.rhs, not row.strict) < (current.rhs, not current.strict):
+                    if current is None:
+                        unique[key] = row
+                    else:
+                        unique[key] = _Row(row.coeffs, row.rhs, row.strict, current.sources | row.sources)
+                else:
+                    unique[key] = _Row(current.coeffs, current.rhs, current.strict, current.sources | row.sources)
             rows = list(unique.values())
         bad = [r for r in rows if self._contradiction(r)]
         return (not bad), rows, stages

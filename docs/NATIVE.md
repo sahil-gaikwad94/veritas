@@ -59,6 +59,15 @@ Two call sites, both on the decode hot path:
   the interpreter cost lives (one automaton clone and step per vocabulary entry).
 * `Interval.from_numeric_prefix` — the numeric mask while a number is being typed.
 
+In addition, the native engine exposes a **packed `u64` vocabulary bitset** for whole-row
+masking — `PyVocabularyTrie.mask_bitset(prefix)` returns `ceil(|V| / 64)` words
+(≈ 16 KB for a 128k vocabulary) that a caller can AND into a logits buffer in one
+vectorised operation without rebuilding a boolean list. `python/veritas/native.py` also
+provides pure-Python helpers `bitset_from_mask` / `mask_from_bitset` for the same packing,
+so nothing downstream of the ABI is numerically different whether the accelerator is loaded
+or not. The pure-Python `TokenMasker` additionally caches masks by a canonical PDA
+signature rather than by the raw prefix.
+
 Exposed but **not** wired in: `native.solve_linear`
 (exact feasibility). It is parity-tested and available to callers, but the decode engine
 uses its own stateful Python contractor, and the stateless wire call would cost more than it

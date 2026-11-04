@@ -42,6 +42,8 @@ __all__ = [
     "numeric_prefix_or_none",
     "contract",
     "solve_linear",
+    "bitset_from_mask",
+    "mask_from_bitset",
     "PyVocabularyTrie",
 ]
 
@@ -305,3 +307,31 @@ if available():
     PyVocabularyTrie = _NATIVE.PyVocabularyTrie
 else:
     PyVocabularyTrie = None
+
+
+def bitset_from_mask(mask: Sequence[bool | int]) -> list[int]:
+    """Pack a boolean mask into ``u64`` words (length ``ceil(n / 64)``)."""
+
+    words = (len(mask) + 63) // 64
+    bits = [0] * words
+    for index, ok in enumerate(mask):
+        if ok:
+            bits[index >> 6] |= 1 << (index & 63)
+    return bits
+
+
+def mask_from_bitset(bits: Sequence[int], vocab_size: int) -> list[bool]:
+    """Unpack a ``u64`` bitset into a boolean mask aligned with the vocabulary."""
+
+    out = [False] * int(vocab_size)
+    for word_index, word in enumerate(bits):
+        word = int(word)
+        base = word_index * 64
+        while word:
+            low = word & -word
+            offset = low.bit_length() - 1
+            index = base + offset
+            if index < vocab_size:
+                out[index] = True
+            word ^= low
+    return out

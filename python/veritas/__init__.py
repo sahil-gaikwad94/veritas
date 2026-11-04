@@ -18,9 +18,11 @@ from typing import Any
 
 from . import native
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # --- authoring layer -------------------------------------------------------
+# --- tier 0 / 1 / 2 engines ----------------------------------------------
+from . import mcp
 from .cartridges.sec import WorldState
 
 # --- jump-forward / backtracking -----------------------------------------
@@ -44,9 +46,6 @@ from .compiler.vir import (
     VirType,
     ZeroDofRule,
 )
-
-# --- tier 0 / 1 / 2 engines ----------------------------------------------
-from . import mcp
 from .crane_mode import CraneModeController
 
 # --- decoding / proof -----------------------------------------------------
@@ -116,10 +115,6 @@ from .ltlf import (
     Always as Always,
 )
 from .ltlf import (
-    Always as Always,
-)
-from .mcp import McpRequireError, McpState, UntrustedString, VeritasMcpSession, is_untainted, taint
-from .ltlf import (
     Event,
     Formula,
     Trace,
@@ -138,6 +133,7 @@ from .ltlf import (
 from .ltlf import (
     evaluate as evaluate_formula,
 )
+from .mcp import McpRequireError, McpState, UntrustedString, VeritasMcpSession, is_untainted, taint
 from .nano_solver import SolverStatus, VeritasNanoSolver
 from .native import PyVocabularyTrie
 from .pattern import PatternConstraint, UnsupportedPattern

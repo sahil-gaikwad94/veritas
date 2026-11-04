@@ -40,11 +40,14 @@ class VerifiedSchema:
         if self.config.get("preflight_check", True):
             self.preflight = run_preflight(self.spec)
             if self.preflight.status == "UNSAT":
-                raise InfeasibleSpecError(
+                err = InfeasibleSpecError(
                     f"Spec {self.name} is infeasible at pre-flight",
                     conflicts=self.preflight.conflicts,
                     relaxation=self.preflight.relaxation,
                 )
+                # Keep the compiled spec so CLIs can still run the relaxation wizard.
+                err.spec = self.spec  # type: ignore[attr-defined]
+                raise err
         # convenience alias
         self.preflight_result = self.preflight
 

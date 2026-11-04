@@ -98,6 +98,13 @@ class DecodeConfig:
     numeric_tolerance: float = 1e-9
     #: Optional path to a JSONL trace of conflict-branch records for ``veritas export-rl``.
     rl_trace_path: str | None = None
+    #: If True, on CDCL backtrack the engine re-opens a bounded CRANE scratchpad seeded
+    #: with the algebraic conflict certificate (field, reason, domain cut).  The notes are
+    #: appended to ``result.reasoning`` — never to the decoded JSON — and keep their
+    #: ``<|solver_feedback|>`` markers so a downstream tool can lift them verbatim.
+    reflex_on_backtrack: bool = False
+    #: Cap on the characters of the adaptive feedback span per backtrack.
+    reflex_max_chars: int = 512
 
 
 @dataclass
@@ -496,10 +503,8 @@ class VeritasSession:
         path = self.config.rl_trace_path
         if not path:
             return
-        import hashlib
         import json as _json
         import os
-        import tempfile
 
         records: list[dict[str, Any]] = []
         for record in self.rl.records:
@@ -520,6 +525,43 @@ class VeritasSession:
         except OSError:
             # Trace capture must never break a verified generation.
             return
+
+    def _reflex_feedback(self, model: Any, exc: DeadEnd) -> None:
+        """Re-open a bounded scratchpad seeded with the algebraic conflict certificate.
+
+        The feedback never lands in ``self.text``: it is an ephemeral reasoning span for the
+        model's next attempt, surfaced on ``DecodeResult.reasoning`` with explicit
+        ``<|solver_feedback|>`` markers so a caller (or a downstream agent loop) can lift it.
+        """
+
+        cut: dict[str, Any] | None = None
+        if self.telemetry.domain_cuts:
+            cut = self.telemetry.domain_cuts[-1]
+        cut_describe = ""
+        if cut:
+            bounds = cut.get("bounds") or cut.get("bounds", [])
+            cut_describe = f" domain cut to [{bounds[0]:.6g}, {bounds[1]:.6g}] for {cut.get('field')!r};" if bounds else ""
+        feedback = (
+            f"Backtrack at field `{exc.field_name}`: {exc.reason}.{cut_describe} "
+            f"Admissible interval is unchanged by the splice; resample a different value."
+        )
+        text = _model_reasoning(model, f"{self.prompt}\n<|solver_feedback|>{feedback}</|solver_feedback|>",
+                                self.config.reflex_max_chars)
+        if not text:
+            text = "acknowledging backtrack; will sample away from the cut branch"
+        span = f"<|solver_feedback|>{feedback}</|solver_feedback|>\n{text}\n"
+        self.reasoning = (self.reasoning + "\n" + span).strip() if self.reasoning else span
+        self.telemetry.reasoning_chars += len(span)
+        self.trace.append(
+            StepTrace(
+                step=self._next_step(),
+                attempt=self._attempt,
+                field_name=str(exc.field_name or "<reflex>"),
+                char="",
+                kind="reflex",
+                note=f"solver feedback reflex on backtrack ({len(text)} chars)",
+            )
+        )
 
     # ------------------------------------------------------------------
     # CRANE scratchpad
@@ -581,6 +623,8 @@ class VeritasSession:
                     StepTrace(self._next_step(), attempt, str(exc.field_name), "", kind="backtrack",
                               note=exc.reason)
                 )
+                if self.config.reflex_on_backtrack:
+                    self._reflex_feedback(model, exc)
                 if not self._cut_for_field(exc.field_name):
                     break
                 continue

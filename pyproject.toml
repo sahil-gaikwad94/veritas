@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veritas-ai"
-version = "2.0.0"
+version = "2.1.0"
 description = "Neuro-symbolic solver-guided decoding and formal verification engine"
 readme = "README.md"
 requires-python = ">=3.11"

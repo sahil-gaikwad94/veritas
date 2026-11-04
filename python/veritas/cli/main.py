@@ -13,6 +13,7 @@ import html
 import importlib
 import importlib.util
 import json
+import math
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -81,6 +82,17 @@ def _select(schemas: Sequence[VerifiedSchema], name: str | None, target: str) ->
         f"{target!r} defines {len(schemas)} schemas; select one with --name "
         + ", ".join(s.name for s in schemas)
     )
+
+
+def _load_schemas_or_explain_unsat(target: str):
+    """Load schemas; if the module is infeasible, return the spec attached to the error."""
+
+    from ..compiler.preflight import InfeasibleSpecError
+
+    try:
+        return load_schemas(target), None
+    except InfeasibleSpecError as exc:
+        return None, getattr(exc, "spec", None)
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +344,96 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# serve: OpenAI-compatible verification reverse proxy
+# ---------------------------------------------------------------------------
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from ..serve import serve
+
+    try:
+        server = serve(
+            upstream=args.upstream,
+            spec_module=args.spec_module,
+            spec=args.spec,
+            port=args.port,
+            host=args.host,
+            enforce=not args.monitor,
+            api_key=args.api_key,
+            verbose=args.verbose,
+        )
+    except Exception as exc:
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    specs = ", ".join(sorted(server.veritas_registry.specs))  # type: ignore[attr-defined]
+    print(f"veritas serve -> {args.upstream} on {args.host}:{args.port}")
+    print(f"  specs: {specs or '(none, proxy mode)'}   mode: {'monitor' if args.monitor else 'enforce'}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopping")
+    finally:
+        server.server_close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# explain-unsat: minimal relaxation wizard for infeasible specs
+# ---------------------------------------------------------------------------
+
+def cmd_explain_unsat(args: argparse.Namespace) -> int:
+    from ..elastic import explain_unsat
+
+    schemas, infeasible = _load_schemas_or_explain_unsat(args.target)
+    if schemas is None and infeasible is None:
+        from ..compiler.preflight import InfeasibleSpecError
+        raise InfeasibleSpecError(f"{args.target!r} does not compile and carries no spec")
+    if schemas is None:
+        report = explain_unsat(infeasible)
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print("✗ UNSAT (0 LLM tokens spent)")
+            for detail in report["details"]:
+                print(f"  ├── {detail}")
+            for item in report["suggestions"]:
+                if item["op"] == "?" or not math.isfinite(float(item["delta"])):
+                    print(f"      ! clause #{item['clause']}: no single-clause repair")
+                elif item["direction"] == "widen":
+                    print(
+                        f"      clause #{item['clause']}: widen eq |sum - {item['rhs']:.6g}| <= {item['delta']:.6g}"
+                    )
+                else:
+                    print(f"      clause #{item['clause']}: relax {item['op']} "
+                          f"rhs {item['rhs']:.6g} -> {item['new_rhs']:.6g} (delta {item['delta']:+.6g})")
+        return 1
+    schema = _select(schemas, args.name, args.target)
+    report = explain_unsat(schema.spec)
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if report["status"] != "UNSAT" else 1
+    print(f"{schema.name}: {report['status']}")
+    if report["status"] != "UNSAT":
+        for detail in report["details"] or []:
+            print(f"  . {detail}")
+        return 0
+    print("  ✗ UNSAT (0 LLM tokens spent)")
+    for detail in report["details"]:
+        print(f"  ├── {detail}")
+    suggestions = report["suggestions"]
+    if suggestions:
+        print("  └── minimal single-clause repairs:")
+        for item in suggestions:
+            if item["op"] == "?" or not math.isfinite(float(item["delta"])):
+                print(f"      ! clause #{item['clause']}: no single-clause repair (joint or structural fix needed)")
+            else:
+                print(
+                    f"      clause #{item['clause']}: relax {item['op']} "
+                    f"rhs {item['rhs']:.6g} -> {item['new_rhs']:.6g} (delta {item['delta']:+.6g})"
+                )
+    return 1
+
+
+# ---------------------------------------------------------------------------
 # export-rl: turn decoder traces into TRL-ready preference data
 # ---------------------------------------------------------------------------
 
@@ -350,7 +452,7 @@ def cmd_export_rl(args: argparse.Namespace) -> int:
     collector = VeritasRLCollector()
     bad_lines = 0
     with open(args.traces, encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, 1):
+        for _line_no, line in enumerate(handle, 1):
             line = line.strip()
             if not line:
                 continue
@@ -412,7 +514,7 @@ def cmd_export_rl(args: argparse.Namespace) -> int:
         rows = [step.as_dict() for step in collector.steps]
         if not rows and collector.records:
             # Derive dense step rewards for conflicts: terminal -1, repair progress bonus.
-            for index, record in enumerate(collector.records):
+            for _index, record in enumerate(collector.records):
                 terminal = 1.0 if record.chosen else -5.0
                 rows.append(
                     StepRecord(
@@ -493,6 +595,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["dpo", "grpo"], required=True)
     p.add_argument("-o", "--out", required=True, help="output JSONL (+ .manifest.json)")
     p.set_defaults(func=cmd_export_rl)
+
+    p = sub.add_parser("serve", help="OpenAI-compatible verification reverse proxy")
+    p.add_argument("--upstream", required=True, help="upstream base URL, e.g. http://127.0.0.1:11434/v1")
+    p.add_argument("--spec-module", help="Python module defining @vt.verified_schema() functions")
+    p.add_argument("--spec", help="default spec name to enforce")
+    p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--monitor", action="store_true", help="attach certificates but never block responses")
+    p.add_argument("--api-key", help="upstream API key (else forwarded from the client request)")
+    p.add_argument("--verbose", action="store_true")
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("explain-unsat", help="explain an infeasible spec and suggest minimal repairs")
+    p.add_argument("target", help="path.py[:name] or module[:name]")
+    p.add_argument("--name", help="select one schema when the module defines several")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_explain_unsat)
 
     p = sub.add_parser("synth", help="infer a schema module from JSON examples")
     p.add_argument("--from-json")

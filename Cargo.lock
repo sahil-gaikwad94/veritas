@@ -191,11 +191,11 @@ checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
 name = "veritas-core"
-version = "2.0.0"
+version = "2.1.0"
 
 [[package]]
 name = "veritas-py"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "pyo3",
  "veritas-core",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "veritas-wasm"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "veritas-core",
  "wasm-bindgen",

@@ -50,7 +50,7 @@ struct Row {
     bound: Rational,
     strict: bool,
     /// Ancestor bitmask of the original constraints this row was combined from.
-    /// Tracked so FM can apply Kohler's redundant-inequality pruning in O(1).
+    /// Tracked for unsat-core provenance; no longer used for pruning.
     sources: u64,
 }
 
@@ -144,7 +144,7 @@ fn rows_from(constraints: &[Linear]) -> Res<Vec<Row>> {
     Ok(rows)
 }
 
-fn eliminate(rows: &[Row], var: u32, step: usize) -> Res<Vec<Row>> {
+fn eliminate(rows: &[Row], var: u32) -> Res<Vec<Row>> {
     let mut positive: Vec<&Row> = Vec::new();
     let mut negative: Vec<&Row> = Vec::new();
     let mut rest: Vec<Row> = Vec::new();
@@ -168,12 +168,6 @@ fn eliminate(rows: &[Row], var: u32, step: usize) -> Res<Vec<Row>> {
             .get(&var)
             .ok_or_else(|| "internal: missing coefficient".to_string())?;
         for right in &negative {
-            // Kohler's redundant-inequality pruning: after k variables have been eliminated,
-            // any row whose lineage contains more than k + 2 source constraints is a redundant
-            // combination and can be dropped.  Bitwise and O(1).
-            if (left.sources | right.sources).count_ones() as usize > step + 2 {
-                continue;
-            }
             let right_coeff = *right
                 .coeffs
                 .get(&var)
@@ -187,16 +181,82 @@ fn eliminate(rows: &[Row], var: u32, step: usize) -> Res<Vec<Row>> {
             rest.push(combined);
         }
     }
-    Ok(rest)
+    // Redundant-inequality elimination by *subsumption*: rows are bucketed by
+    // direction-normalized coefficient sign/magnitude and only the strongest bound in
+    // each bucket survives.  Subsumption is sound (the dropped row is implied by the
+    // kept one).  The previous lineage-size rule could drop the only contradictory
+    // combination and flip UNSAT to a wrong verdict.
+    Ok(subsume(rest))
+}
+
+/// Direction-normalized key: multiply by -1 so the largest-|coefficient| is positive,
+/// divide by it, and encode exactly as (var, numer, denom) triples so buckets compare
+/// exactly.  Constant rows share the empty key.
+fn normalized_key(row: &Row) -> Vec<(u32, i128, i128)> {
+    let mut items: Vec<(u32, Rational)> = row.coeffs.iter().map(|(&var, &coeff)| (var, coeff)).collect();
+    if items.is_empty() {
+        return Vec::new();
+    }
+    // Pivot: the largest-|coefficient|.  Rows are scaled by a POSITIVE constant (the pivot
+    // magnitude) so the largest coefficient becomes +/-1 *with its sense intact*; scaling by
+    // a negative constant would silently swap the inequality direction.
+    let mut pivot = items[0].1;
+    for &(_, coeff) in items.iter().skip(1) {
+        let abs_c = if coeff.is_negative() { coeff.neg() } else { coeff };
+        let abs_p = if pivot.is_negative() { pivot.neg() } else { pivot };
+        if abs_c.compare(abs_p) == Some(Ordering::Greater) {
+            pivot = coeff;
+        }
+    }
+    let abs_pivot = if pivot.is_negative() { pivot.neg() } else { pivot };
+    let mut key = Vec::with_capacity(items.len());
+    for (var, coeff) in items {
+        match coeff.div(abs_pivot) {
+            Some(c) => key.push((var, c.numer(), c.denom())),
+            // Overflow: fall back to exact raw terms (buckets stay tiny — nothing is dropped).
+            None => key.push((var, coeff.numer(), coeff.denom())),
+        }
+    }
+    key
+}
+
+fn subsume(rows: Vec<Row>) -> Vec<Row> {
+    let mut buckets: BTreeMap<Vec<(u32, i128, i128)>, Row> = BTreeMap::new();
+    for row in rows {
+        let key = normalized_key(&row);
+        match buckets.get_mut(&key) {
+            Some(current) => {
+                let tighter = match row.bound.compare(current.bound) {
+                    Some(Ordering::Less) => true,
+                    Some(Ordering::Equal) => row.strict && !current.strict,
+                    _ => false,
+                };
+                if tighter {
+                    *current = Row {
+                        coeffs: row.coeffs,
+                        bound: row.bound,
+                        strict: row.strict,
+                        sources: current.sources | row.sources,
+                    };
+                } else {
+                    current.sources |= row.sources;
+                }
+            }
+            None => {
+                buckets.insert(key, row);
+            }
+        }
+    }
+    buckets.into_values().collect()
 }
 
 fn eliminate_all(rows: &[Row], order: &[u32]) -> Res<Vec<Row>> {
     let mut current = rows.to_vec();
-    for (step, var) in order.iter().enumerate() {
+    for var in order {
         if current.len() > MAX_ROWS {
             return Err("system blowup".to_string());
         }
-        current = eliminate(&current, *var, step)?;
+        current = eliminate(&current, *var)?;
     }
     Ok(current)
 }
@@ -577,6 +637,20 @@ mod tests {
             Outcome::Unsat { core } => assert_eq!(core, vec![0, 1]),
             other => panic!("expected UNSAT, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn pruned_combinations_do_not_flip_unsat() {
+        // a + b == 1 (split into two rows), a >= 0.7, b >= 0.7, plus upper rows that used to
+        // hide the contradiction from lineage-size pruning.
+        let constraints = [
+            atom(&[(0, 1.0), (1, 1.0)], 1.0, CmpOp::Eq),
+            atom(&[(0, 1.0)], 0.7, CmpOp::Ge),
+            atom(&[(1, 1.0)], 0.7, CmpOp::Ge),
+            atom(&[(0, 1.0)], 1.0, CmpOp::Le),
+            atom(&[(1, 1.0)], 1.0, CmpOp::Le),
+        ];
+        assert!(matches!(solve(&constraints), Outcome::Unsat { .. }));
     }
 
     #[test]
