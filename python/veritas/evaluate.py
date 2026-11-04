@@ -221,7 +221,7 @@ def eval_expr(expr: Any, env: Mapping[Any, Any], elem: Mapping[str, Any] | None 
     if kind == "dot":
         return _eval_dot(expr, args, env, elem)
 
-    if kind == "quad_form_cholesky":
+    if kind in ("quad_form_cholesky", "quad_form_split"):
         return _eval_quad_form(expr, args, env, elem)
 
     if kind == "keys_subset":
@@ -681,7 +681,7 @@ def expr_to_str(expr: Any, names: Mapping[int, str] | None = None, prefix: str =
     if kind == "dot":
         inner = ", ".join(expr_to_str(a, names, prefix) for a in expr.args)
         return f"dot({inner})"
-    if kind == "quad_form_cholesky":
+    if kind in ("quad_form_cholesky", "quad_form_split"):
         inner = ", ".join(expr_to_str(a, names, prefix) for a in expr.args)
         return f"quad_form({inner}, Σ)"
     if kind == "keys_subset":

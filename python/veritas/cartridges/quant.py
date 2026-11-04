@@ -82,25 +82,129 @@ def cholesky_with_jitter(matrix: Sequence[Sequence[float]], jitter: float = 1e-1
     return cholesky(matrix, jitter)
 
 
-def eigendecomposition_split(matrix: Sequence[Sequence[float]]) -> tuple[list[list[float]], list[list[float]]]:
-    """Split symmetric matrix into positive and negative semidefinite parts via eigendecomposition.
-    
-    Returns (Q_plus, Q_minus) where matrix = Q_plus - Q_minus, both PSD.
-    Uses power iteration for simplicity (for small matrices in contractor).
+def _jacobi_eigh(
+    matrix: Sequence[Sequence[float]],
+    tol: float = 1e-12,
+    max_sweeps: int = 100,
+) -> tuple[list[float], list[list[float]]]:
+    """Pure-Python symmetric eigensolver (cyclic Jacobi sweep).
+
+    Dependency-free: works on any IEEE-754 double matrix, returns eigenvalues and the
+    eigenvectors as columns of the returned matrix ``v`` (``v[i][k]`` is component ``i`` of
+    eigenvector ``k``).  Sweeps rotate the largest off-diagonal mass to zero; for the small
+    matrices involved in portfolio/covariance work (<= 64x64) this converges quadratically
+    and needs at most a few dozen sweeps.
     """
-    import numpy as np
-    a = np.array(matrix, dtype=np.float64)
-    if a.shape[0] != a.shape[1]:
-        raise ValueError("Matrix must be square")
-    # Ensure symmetric
-    a = (a + a.T) / 2
-    eigenvalues, eigenvectors = np.linalg.eigh(a)
-    # Split into positive and negative parts
-    pos_evals = np.maximum(eigenvalues, 0)
-    neg_evals = np.maximum(-eigenvalues, 0)
-    q_plus = eigenvectors @ np.diag(pos_evals) @ eigenvectors.T
-    q_minus = eigenvectors @ np.diag(neg_evals) @ eigenvectors.T
-    return q_plus.tolist(), q_minus.tolist()
+
+    n = len(matrix)
+    a = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        row = matrix[i]
+        for j in range(n):
+            value = float(row[j])
+            if not math.isfinite(value):
+                raise ValueError("matrix entries must be finite")
+            a[i][j] = value
+    # Symmetrize: covariance inputs are symmetric up to float noise.
+    for i in range(n):
+        for j in range(i + 1, n):
+            average = 0.5 * (a[i][j] + a[j][i])
+            a[i][j] = average
+            a[j][i] = average
+
+    v = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+    for _ in range(max_sweeps):
+        off = 0.0
+        for p in range(n):
+            for q in range(p + 1, n):
+                off += a[p][q] * a[p][q]
+        if math.sqrt(off) <= tol:
+            break
+        for p in range(n):
+            for q in range(p + 1, n):
+                apq = a[p][q]
+                if abs(apq) <= tol:
+                    continue
+                tau = (a[q][q] - a[p][p]) / (2.0 * apq)
+                if tau == 0.0:
+                    t = 1.0
+                else:
+                    t = math.copysign(1.0 / (abs(tau) + math.sqrt(1.0 + tau * tau)), tau)
+                c = 1.0 / math.sqrt(1.0 + t * t)
+                s = t * c
+                a[p][p] -= t * apq
+                a[q][q] += t * apq
+                a[p][q] = 0.0
+                a[q][p] = 0.0
+                for r in range(n):
+                    if r == p or r == q:
+                        continue
+                    arp, arq = a[r][p], a[r][q]
+                    a[r][p] = a[p][r] = c * arp - s * arq
+                    a[r][q] = a[q][r] = s * arp + c * arq
+                for r in range(n):
+                    vrp, vrq = v[r][p], v[r][q]
+                    v[r][p] = c * vrp - s * vrq
+                    v[r][q] = s * vrp + c * vrq
+    eigenvalues = [a[i][i] for i in range(n)]
+    return eigenvalues, v
+
+
+def eigendecomposition_split(matrix: Sequence[Sequence[float]]) -> tuple[list[list[float]], list[list[float]]]:
+    """Split a symmetric matrix into PSD parts: ``matrix == q_plus - q_minus``.
+
+    Returns ``(Q_plus, Q_minus)`` where both are symmetric positive-semidefinite, via a
+    pure-Python Jacobi symmetric eigendecomposition — no NumPy dependency.  Near-zero
+    eigenvalues (|lambda| <= 1e-12) are truncated and assigned to neither side.
+    """
+
+    n = len(matrix)
+    if n == 0:
+        return [], []
+    evals, evecs = _jacobi_eigh(matrix)
+    eps = 1e-12
+    q_plus = [[0.0] * n for _ in range(n)]
+    q_minus = [[0.0] * n for _ in range(n)]
+    for k, lam in enumerate(evals):
+        if abs(lam) <= eps:
+            continue
+        col = [evecs[i][k] * math.sqrt(abs(lam)) for i in range(n)]
+        target = q_plus if lam > 0 else q_minus
+        for i in range(n):
+            ci = col[i]
+            if ci == 0.0:
+                continue
+            row = target[i]
+            for j in range(n):
+                row[j] += ci * col[j]
+    return q_plus, q_minus
+
+
+def eigendecomposition_factors(matrix: Sequence[Sequence[float]]) -> tuple[list[list[float]], list[list[float]]]:
+    """Return full Cholesky-style factors ``(L_plus, L_minus)`` with ``Q+ = L+ L+ᵀ``, ``Q- = L- L-ᵀ``.
+
+    ``matrix == L_plus @ L_plus.T - L_minus @ L_minus.T``.  Used by the interval contractor
+    to build outward-rounded bounds for the difference-of-convex form
+    ``||L+ᵀx||² - ||L-ᵀx||²`` without any NumPy/SciPy dependency.
+    """
+
+    n = len(matrix)
+    if n == 0:
+        return [], []
+    evals, evecs = _jacobi_eigh(matrix)
+    eps = 1e-12
+    l_plus = [[0.0] * n for _ in range(n)]
+    l_minus = [[0.0] * n for _ in range(n)]
+    for k, lam in enumerate(evals):
+        if lam > eps:
+            scale = math.sqrt(lam)
+            for i in range(n):
+                l_plus[i][k] = evecs[i][k] * scale
+        elif lam < -eps:
+            scale = math.sqrt(-lam)
+            for i in range(n):
+                l_minus[i][k] = evecs[i][k] * scale
+    return l_plus, l_minus
 
 
 def is_positive_semidefinite(matrix: Sequence[Sequence[float]], tol: float = 1e-9) -> bool:
@@ -314,6 +418,8 @@ __all__ = [
     "covariance_labels",
     "covariance_matrix",
     "double_entry_balanced",
+    "eigendecomposition_factors",
+    "eigendecomposition_split",
     "expected_return",
     "gaap_balance",
     "implied_volatility",

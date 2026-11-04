@@ -245,7 +245,7 @@ class _SmtRenderer:
             if not terms:
                 return "0"
             return terms[0] if len(terms) == 1 else "(+ " + " ".join(terms) + ")"
-        if kind == "quad_form_cholesky":
+        if kind in ("quad_form_cholesky", "quad_form_split"):
             left = node.args[0] if node.args else None
             vid = self._container_var_id(left)
             cov = getattr(node, "value", None)
@@ -896,6 +896,40 @@ class VerifiedResult(Generic[T]):
     @property
     def ok(self) -> bool:
         return self.report is None or self.report.status == "PASS"
+
+    def receipt(self) -> dict[str, Any]:
+        """Self-contained verification receipt for this generation.
+
+        Content hashes (raw text + spec digest), verification outcome, budget counters and
+        the per-field KL distortion introduced by masking.  For an ed25519-signed proof
+        artifact build a :func:`build_certificate` and ship it alongside this receipt.
+        """
+
+        import hashlib
+
+        def _sha256(text: str) -> str:
+            return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+        tel = self.telemetry or {}
+        report = self.report
+        spec_digest = (report.spec_digest if report is not None else tel.get("spec_digest", "")) or ""
+        return {
+            "sha256": _sha256(self.raw),
+            "spec_digest": spec_digest,
+            "status": report.status if report is not None else None,
+            "model": (self.proof.metadata.get("model") if self.proof is not None else None)
+            or "",
+            "spec_name": self.spec_name,
+            "attempts": tel.get("attempts"),
+            "backtracks": tel.get("backtracks"),
+            "jump_forward_fields": tel.get("jump_forward_fields"),
+            "jump_forward_tokens": tel.get("jump_forward_tokens"),
+            "field_kl_divergence": tel.get("field_kl_divergence", {}),
+            "kl_distortion_tokens": tel.get("kl_distortion_tokens", 0),
+            "elapsed_ms": tel.get("elapsed_ms"),
+            "verified": bool(self.ok),
+            "proof_sha256": (self.proof.sha256 if self.proof is not None else None),
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {

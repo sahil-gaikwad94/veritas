@@ -254,154 +254,164 @@ pub fn mask(prefix: &str, vocabulary: &[String], eos: Option<&str>) -> Vec<u32> 
     allowed
 }
 
-/// A byte-trie for fast vocabulary masking.
-/// 
-/// This trie indexes vocabulary tokens by their byte sequences, enabling
-/// prefix-based filtering in O(|prefix|) instead of O(|vocabulary|).
-/// Used to accelerate `mask` for large vocabularies (e.g., 128k tokens).
+/// A character trie for fast vocabulary masking, driven by the JSON PDA.
+///
+/// The trie is built once per tokenizer vocabulary.  Masking performs a depth-first
+/// traversal: at every node the machine is cloned and advanced by one character; branches
+/// that die are pruned in O(1), and a branch that reaches a full token records its index.
+/// The result is computed in O(sum of token prefix lengths that stay alive) — typically a
+/// few hundred node visits, instead of O(|vocabulary|) document re-parses.  Multi-byte
+/// UTF-8 characters are consumed atomically, so no partial code-point can be emitted.
+///
+/// Empty tokens are ignored (they make no progress).
 #[derive(Clone, Debug)]
 pub struct VocabularyTrie {
-    /// Root node index
-    root: usize,
-    /// All nodes in the trie
+    /// Tree nodes; root (index 0) is "no input consumed".
     nodes: Vec<TrieNode>,
-    /// Mapping from token index to its byte sequence (for reconstruction)
-    token_bytes: Vec<Vec<u8>>,
-    /// EOS token index if any
+    /// Token strings, stored to answer EOS handling and diagnostics.
+    vocabulary: Vec<String>,
+    /// Index of the EOS token in `vocabulary`, when known.
     eos_token: Option<usize>,
-    /// EOS token byte sequence if any (reserved for future use)
-    #[allow(dead_code)]
-    eos_bytes: Option<Vec<u8>>,
 }
 
 /// A node in the vocabulary trie.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct TrieNode {
-    /// Children indexed by byte value (0-255)
-    children: [Option<usize>; 256],
-    /// Token indices that end at this node
-    token_indices: Vec<usize>,
-    /// Whether this node represents a valid token end
-    is_terminal: bool,
-}
-
-impl Default for TrieNode {
-    fn default() -> Self {
-        TrieNode {
-            children: [None; 256],
-            token_indices: Vec::new(),
-            is_terminal: false,
-        }
-    }
+    /// Children keyed by character; `BTreeMap` iterates keys in order for determinism.
+    children: std::collections::BTreeMap<char, usize>,
+    /// Token indices terminating exactly at this node.
+    token_indices: Vec<u32>,
 }
 
 impl VocabularyTrie {
-    /// Build a trie from a vocabulary.
-    /// Returns None if vocabulary is empty.
+    /// Build the trie from a vocabulary.  Returns `None` for an empty vocabulary.
     pub fn new(vocabulary: &[String], eos_token: Option<&str>) -> Option<Self> {
         if vocabulary.is_empty() {
             return None;
         }
-        
-        let mut nodes = Vec::new();
-        nodes.push(TrieNode::default()); // root at index 0
-        
-        let mut token_bytes = Vec::with_capacity(vocabulary.len());
-        
+        let mut trie = VocabularyTrie {
+            nodes: vec![TrieNode::default()],
+            vocabulary: vocabulary.to_vec(),
+            eos_token: None,
+        };
         for (index, token) in vocabulary.iter().enumerate() {
-            let bytes = token.as_bytes().to_vec();
-            token_bytes.push(bytes.clone());
-            
-            let mut node_idx = 0;
-            for &byte in &bytes {
-                let child = nodes[node_idx].children[byte as usize];
-                if let Some(next) = child {
-                    node_idx = next;
-                } else {
-                    let new_idx = nodes.len();
-                    nodes.push(TrieNode::default());
-                    nodes[node_idx].children[byte as usize] = Some(new_idx);
-                    node_idx = new_idx;
-                }
-            }
-            nodes[node_idx].token_indices.push(index);
-            nodes[node_idx].is_terminal = true;
-        }
-        
-        let eos_bytes = eos_token.map(|s| s.as_bytes().to_vec());
-        let eos_token = eos_token.and_then(|s| vocabulary.iter().position(|t| t == s));
-        
-        Some(VocabularyTrie {
-            root: 0,
-            nodes,
-            token_bytes,
-            eos_token,
-            eos_bytes,
-        })
-    }
-    
-    /// Get all token indices that have `prefix` as a prefix.
-    /// Returns a sorted list of indices.
-    pub fn tokens_with_prefix(&self, prefix: &str) -> Vec<u32> {
-        let mut node_idx = self.root;
-        for byte in prefix.as_bytes() {
-            if let Some(next) = self.nodes[node_idx].children[*byte as usize] {
+            let mut node_idx = 0usize;
+            for ch in token.chars() {
+                let next = match trie.nodes[node_idx].children.get(&ch) {
+                    Some(&child) => child,
+                    None => {
+                        let child = trie.nodes.len();
+                        trie.nodes.push(TrieNode::default());
+                        trie.nodes[node_idx].children.insert(ch, child);
+                        child
+                    }
+                };
                 node_idx = next;
-            } else {
-                return Vec::new();
+            }
+            trie.nodes[node_idx].token_indices.push(index as u32);
+        }
+        trie.eos_token = eos_token
+            .and_then(|eos| vocabulary.iter().position(|t| t == eos));
+        Some(trie)
+    }
+
+    /// `Token indices with `prefix` as a literal prefix (unsorted, with duplicates removed).
+    pub fn tokens_with_prefix(&self, prefix: &str) -> Vec<u32> {
+        let mut node_idx = 0usize;
+        for ch in prefix.chars() {
+            match self.nodes[node_idx].children.get(&ch) {
+                Some(&next) => node_idx = next,
+                None => return Vec::new(),
             }
         }
         self.collect_token_indices(node_idx)
     }
-    
-    /// Collect all token indices from a trie node and its descendants.
+
+    /// All token indices in the subtree rooted at `node_idx`, sorted and deduplicated.
     fn collect_token_indices(&self, node_idx: usize) -> Vec<u32> {
         let mut result = Vec::new();
         let mut stack = vec![node_idx];
         while let Some(idx) = stack.pop() {
-            result.extend(self.nodes[idx].token_indices.iter().copied());
-            for &child in &self.nodes[idx].children {
-                if let Some(child_idx) = child {
-                    stack.push(child_idx);
-                }
-            }
+            result.extend_from_slice(&self.nodes[idx].token_indices);
+            stack.extend(self.nodes[idx].children.values().copied());
         }
         result.sort_unstable();
         result.dedup();
-        result.into_iter().map(|i| i as u32).collect()
+        result
     }
-    
-    /// Fast mask using the trie: only check tokens that are valid JSON continuations.
-    /// This is the main entry point for accelerated masking.
-    pub fn mask(&self, prefix: &str, vocabulary: &[String], eos: Option<&str>) -> Vec<u32> {
-        // Get candidate token indices from the trie
-        let candidates = self.tokens_with_prefix(prefix);
-        
-        // Check each candidate with the full prefix_status
+
+    /// Indices of the tokens that keep the document alive after `prefix`.
+    ///
+    /// Equivalent to [`super::json::mask`] with respect to this crate's PDA; empty tokens
+    /// are never reported.  The end-of-sequence token is included only when the document is
+    /// complete.
+    pub fn mask(&self, prefix: &str, eos: Option<&str>) -> Vec<u32> {
+        let mut base = crate::pda::Pda::new();
+        if !base.push_str(prefix) {
+            return Vec::new();
+        }
         let mut allowed = Vec::new();
-        for &idx in &candidates {
-            let mut candidate = String::with_capacity(prefix.len() + self.token_bytes[idx as usize].len());
-            candidate.push_str(prefix);
-            candidate.push_str(&vocabulary[idx as usize]);
-            if prefix_status(&candidate) != Prefix::Invalid {
-                allowed.push(idx);
+        self.dfs_mask(0, &base, &mut allowed);
+        self.append_eos(&base, eos, &mut allowed);
+        allowed.sort_unstable();
+        allowed.dedup();
+        allowed
+    }
+
+    /// Packed validity bitset: word `i / 64`, bit `i % 64` set iff token `i` is allowed.
+    ///
+    /// Length is `ceil(|vocabulary| / 64)`; callers map it onto logits with one
+    /// vectorized mask multiply instead of per-index gathers.
+    pub fn mask_bitset(&self, prefix: &str, eos: Option<&str>) -> Vec<u64> {
+        let allowed = self.mask(prefix, eos);
+        self.bitset_from_allowed(&allowed)
+    }
+
+    fn bitset_from_allowed(&self, allowed: &[u32]) -> Vec<u64> {
+        let words = self.vocabulary.len().div_ceil(64);
+        let mut bits = vec![0u64; words];
+        for &index in allowed {
+            let index = index as usize;
+            if index / 64 < words {
+                bits[index / 64] |= 1u64 << (index % 64);
             }
         }
-        
-        // Handle EOS token
-        if let Some(eos_token) = eos {
-            if prefix_status(prefix) == Prefix::Complete {
-                if let Some(eos_idx) = self.eos_token {
-                    if vocabulary[eos_idx] == eos_token {
-                        allowed.push(eos_idx as u32);
+        bits
+    }
+
+    /// Number of words `mask_bitset` returns (`ceil(|vocabulary| / 64)`).
+    pub fn bitset_words(&self) -> usize {
+        self.vocabulary.len().div_ceil(64)
+    }
+
+    fn dfs_mask(&self, node_idx: usize, pda: &crate::pda::Pda, allowed: &mut Vec<u32>) {
+        let node = &self.nodes[node_idx];
+        if node_idx > 0 {
+            allowed.extend_from_slice(&node.token_indices);
+        }
+        for (&ch, &child_idx) in &node.children {
+            let mut next = pda.clone();
+            if next.step(ch) && next.is_alive() {
+                self.dfs_mask(child_idx, &next, allowed);
+            }
+        }
+    }
+
+    fn append_eos(&self, base: &crate::pda::Pda, eos: Option<&str>, allowed: &mut Vec<u32>) {
+        let Some(eos) = eos else { return };
+        if !base.is_complete() {
+            return;
+        }
+        match self.eos_token {
+            Some(index) if self.vocabulary[index] == eos => allowed.push(index as u32),
+            _ => {
+                for (index, token) in self.vocabulary.iter().enumerate() {
+                    if token == eos {
+                        allowed.push(index as u32);
                     }
                 }
             }
         }
-        
-        allowed.sort_unstable();
-        allowed.dedup();
-        allowed
     }
 }
 

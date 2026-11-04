@@ -14,9 +14,10 @@ time linear in the prefix length:
 ``allowed_next(prefix, alphabet)``
     Which single characters keep the prefix feasible.  This is the character-level mask.
 
-Only a regular subset is supported.  Anything outside it raises
-:class:`UnsupportedPattern` so callers can fall back to length bounds plus the concrete
-verifier instead of silently weakening the mask.
+Supported zero-width assertions: ``^``, ``$`` (end-of-input flavour), ``\\b``/``\\B``
+(word boundary / non-boundary, resolved against the actual previous/next character;
+end-of-string counts as a non-word neighbour).  Anything outside the subset raises
+:class:`UnsupportedPattern` so callers fall back to length bounds plus the verifier.
 """
 
 from __future__ import annotations
@@ -34,6 +35,35 @@ except ImportError:  # pragma: no cover - older interpreters
 
 class UnsupportedPattern(ValueError):
     """The pattern uses a construct this recognizer cannot mask exactly."""
+
+
+def _is_word(ch: str | None) -> bool:
+    """Word-character test used for ``\\b``/``\\B`` (approximates :class:`re.ASCII` view)."""
+
+    if ch is None:
+        return False  # end of string is not a word character
+    return ch.isalnum() or ch == "_"
+
+
+class _Cond:
+    """Zero-width conditional epsilon edge for word-boundary assertions.
+
+    Satisfied iff ``prev_word != next_word`` for ``boundary`` and the opposite for
+    ``non_boundary``; both are resolved at the boundary between two characters (or at
+    end-of-string, where ``next_word`` is ``False``).
+    """
+
+    __slots__ = ("kind",)
+
+    def __init__(self, kind: str):
+        self.kind = kind  # "boundary" | "non_boundary"
+
+    def satisfied(self, prev_word: bool, next_word: bool) -> bool:
+        boundary = prev_word != next_word
+        return boundary if self.kind == "boundary" else not boundary
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"_Cond({self.kind})"
 
 
 # ---------------------------------------------------------------------------
@@ -97,13 +127,24 @@ class _Nfa:
         self.edges[src].append((predicate, dst))
 
     # -- simulation ------------------------------------------------------
-    def closure(self, states: Iterable[int]) -> frozenset[int]:
+    def closure(
+        self,
+        states: Iterable[int],
+        prev_word: bool = False,
+        next_word: bool = False,
+    ) -> frozenset[int]:
         seen = set(states)
         stack = list(seen)
         while stack:
             state = stack.pop()
             for predicate, target in self.edges[state]:
-                if predicate is None and target not in seen:
+                if predicate is None:
+                    ok = True
+                elif isinstance(predicate, _Cond):
+                    ok = predicate.satisfied(prev_word, next_word)
+                else:
+                    continue  # character edges are not zero-width
+                if ok and target not in seen:
                     seen.add(target)
                     stack.append(target)
         return frozenset(seen)
@@ -183,10 +224,16 @@ class _Builder:
                 start, end = nfa.new_state(), nfa.new_state()
                 nfa.epsilon(start, end)
                 return start, end
-            if av in (_sre_parse.AT_BOUNDARY, _sre_parse.AT_NON_BOUNDARY,
-                      _sre_parse.AT_LOC_BOUNDARY, _sre_parse.AT_LOC_NON_BOUNDARY,
-                      _sre_parse.AT_UNI_BOUNDARY, _sre_parse.AT_UNI_NON_BOUNDARY):
-                raise UnsupportedPattern("word boundaries (\\b, \\B) are not supported for masking")
+            if av in (_sre_parse.AT_BOUNDARY, _sre_parse.AT_LOC_BOUNDARY,
+                      _sre_parse.AT_UNI_BOUNDARY):
+                start, end = nfa.new_state(), nfa.new_state()
+                nfa.transition(start, _Cond("boundary"), end)
+                return start, end
+            if av in (_sre_parse.AT_NON_BOUNDARY, _sre_parse.AT_LOC_NON_BOUNDARY,
+                      _sre_parse.AT_UNI_NON_BOUNDARY):
+                start, end = nfa.new_state(), nfa.new_state()
+                nfa.transition(start, _Cond("non_boundary"), end)
+                return start, end
             if av in (_sre_parse.AT_LOCALE, _sre_parse.AT_MULTILINE, _sre_parse.AT_UNICODE):
                 # These are flag-setting pseudo-anchors; they don't consume input.
                 # We treat them as epsilon (no-op) since flags are handled at compile time.
@@ -275,6 +322,24 @@ def _strip_anchors(subpattern: Any) -> tuple[Any, bool, bool]:
 # public recognizer
 # ---------------------------------------------------------------------------
 
+def _reverse_reach(nfa: _Nfa) -> frozenset[int]:
+    """All NFA states from which ``accept`` is reachable (any edge kind)."""
+
+    reverse: dict[int, set[int]] = {state: set() for state in range(len(nfa.edges))}
+    for src, edges in enumerate(nfa.edges):
+        for _predicate, target in edges:
+            reverse[target].add(src)
+    reachable = {nfa.accept}
+    stack = [nfa.accept]
+    while stack:
+        node = stack.pop()
+        for src in reverse.get(node, ()):
+            if src not in reachable:
+                reachable.add(src)
+                stack.append(src)
+    return frozenset(reachable)
+
+
 @dataclass
 class PatternConstraint:
     """An incremental recognizer for one JSON-Schema ``pattern``."""
@@ -283,7 +348,7 @@ class PatternConstraint:
     start_anchored: bool = False
     end_anchored: bool = False
     _nfa: _Nfa | None = field(default=None, repr=False)
-    _initial: frozenset[int] = field(default=frozenset(), repr=False)
+    _can_reach_accept: frozenset[int] = field(default=frozenset(), repr=False)
     _entry: int = field(default=0, repr=False)
 
     # -- construction ----------------------------------------------------
@@ -310,7 +375,7 @@ class PatternConstraint:
             start_anchored=start_anchored,
             end_anchored=end_anchored,
             _nfa=nfa,
-            _initial=nfa.closure([entry]),
+            _can_reach_accept=_reverse_reach(nfa),
             _entry=entry,
         )
 
@@ -318,33 +383,31 @@ class PatternConstraint:
     def _step(self, state: PatternState, ch: str) -> PatternState:
         nfa = self._nfa
         assert nfa is not None
+        next_word = _is_word(ch)
+        ctx = nfa.closure(state.frontier, state.prev_word, next_word)
+        matched_any = state.matched_any or (not self.end_anchored and nfa.accept in ctx)
         seeds: set[int] = set()
-
-        for current in state.states:
+        for current in ctx:
             for predicate, target in nfa.edges[current]:
-                if predicate is not None and predicate(ch):
+                if predicate is None or isinstance(predicate, _Cond):
+                    continue  # zero-width edges are resolved inside the closure
+                if predicate(ch):
                     seeds.add(target)
-
-        if not self.start_anchored and not state.matched_any:
-            seeds |= set(self._initial)
-        if not seeds:
-            return PatternState(frozenset(), state.matched_any, state.length + 1)
-        states = nfa.closure(seeds)
-        matched_any = state.matched_any or (not self.end_anchored and nfa.accept in states)
-        return PatternState(states, matched_any, state.length + 1)
+        # The pattern search may restart at the character just consumed.
+        if not self.start_anchored and not matched_any:
+            seeds.add(self._entry)
+        return PatternState(
+            frozenset(seeds), matched_any, state.length + 1, next_word,
+        )
 
     def initial_state(self) -> PatternState:
-        nfa = self._nfa
-        assert nfa is not None
-        states = nfa.closure([self._entry])
-        matched = (not self.end_anchored) and nfa.accept in states
-        return PatternState(states, matched, 0)
+        return PatternState(frozenset({self._entry}), False, 0, False)
 
     def run(self, text: str) -> PatternState:
         state = self.initial_state()
         for ch in text:
             state = self._step(state, ch)
-            if not state.states and not state.matched_any:
+            if not state.frontier and not state.matched_any:
                 return state
         return state
 
@@ -391,8 +454,8 @@ class PatternConstraint:
         frontier: list[tuple[PatternState, str]] = [(start, "")]
         # Length is part of the key: a length window (``minLength``) needs the search to
         # keep extending even after the automaton has reached a saturated state.
-        seen: set[tuple[frozenset[int], bool, int]] = {
-            (start.states, start.matched_any, 0)
+        seen: set[tuple[frozenset[int], bool, int, bool]] = {
+            (start.frontier, start.matched_any, start.length, start.prev_word)
         }
         nodes = 0
         floor = max(0, int(min_length))
@@ -408,9 +471,9 @@ class PatternConstraint:
                 if nodes > 200_000:
                     return None
                 candidate = self._step(state, ch)
-                if not candidate.states:
+                if not candidate.frontier and not candidate.matched_any:
                     continue
-                key = (candidate.states, candidate.matched_any, len(prefix) + 1)
+                key = (candidate.frontier, candidate.matched_any, len(prefix) + 1, candidate.prev_word)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -420,21 +483,37 @@ class PatternConstraint:
 
 @dataclass(frozen=True)
 class PatternState:
-    states: frozenset[int]
+    """Position inside the NFA after consuming a prefix.
+
+    ``frontier`` holds the *unresolved* positions: character transitions have been taken,
+    but zero-width assertions (including ``\\b``/``\\B``) are resolved per boundary with the
+    actual next character, or at end-of-string with ``next_word=False``.
+    """
+
+    frontier: frozenset[int]
     matched_any: bool
     length: int = 0
+    prev_word: bool = False
 
     def satisfied(self, constraint: PatternConstraint) -> bool:
         nfa = constraint._nfa
         assert nfa is not None
+        ctx = nfa.closure(self.frontier, self.prev_word, False)
         if constraint.end_anchored:
-            return nfa.accept in self.states
-        return self.matched_any
+            return nfa.accept in ctx
+        return self.matched_any or nfa.accept in ctx
 
     def feasible(self, constraint: PatternConstraint) -> bool:
         if self.satisfied(constraint):
             return True
-        return bool(self.states)
+        nfa = constraint._nfa
+        assert nfa is not None
+        # Over-approximate: allow either next-char context.  Never prunes a prefix that
+        # has a satisfying extension.
+        union = nfa.closure(self.frontier, self.prev_word, False) | nfa.closure(
+            self.frontier, self.prev_word, True
+        )
+        return bool(union & constraint._can_reach_accept)
 
 
 # ---------------------------------------------------------------------------

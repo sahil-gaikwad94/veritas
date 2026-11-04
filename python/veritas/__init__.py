@@ -46,6 +46,7 @@ from .compiler.vir import (
 )
 
 # --- tier 0 / 1 / 2 engines ----------------------------------------------
+from . import mcp
 from .crane_mode import CraneModeController
 
 # --- decoding / proof -----------------------------------------------------
@@ -115,15 +116,23 @@ from .ltlf import (
     Always as Always,
 )
 from .ltlf import (
+    Always as Always,
+)
+from .mcp import McpRequireError, McpState, UntrustedString, VeritasMcpSession, is_untainted, taint
+from .ltlf import (
     Event,
     Formula,
     Trace,
     always,
     at_most,
     before,
+    conjunction,
     eventually,
+    implies,
+    negate,
     never,
     occurred,
+    once,
     responds,
 )
 from .ltlf import (
@@ -262,7 +271,14 @@ __all__ = [
     "__version__",
     "doctor",
     "native",
+    "mcp",
     "PyVocabularyTrie",
+    "VeritasMcpSession",
+    "McpState",
+    "McpRequireError",
+    "UntrustedString",
+    "taint",
+    "is_untainted",
     # authoring
     "verified_schema",
     "VerifiedSchema",
@@ -384,6 +400,10 @@ __all__ = [
     "responds",
     "at_most",
     "occurred",
+    "once",
+    "implies",
+    "negate",
+    "conjunction",
     "evaluate_formula",
     "VeritasRLCollector",
     "StepRecord",

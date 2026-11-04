@@ -38,6 +38,8 @@ PATTERNS = [
     "^x?y?z?$",
     "^a.c$",
     "^[0-9]{1,3}(,[0-9]{3})*$",
+    r"\bfoo\b",
+    r"\Bfoo",
 ]
 
 
@@ -105,12 +107,52 @@ def test_allowed_next_is_exhaustive(pattern):
 
 @pytest.mark.parametrize(
     "pattern",
-    ["(?i)abc", "^(a)\\1$", "\\bfoo\\b", "(?P<x>a)(?P=x)"],
+    ["(?i)abc", "^(a)\\1$", "(?P<x>a)(?P=x)", "(?<=a)b", "(?=a)b"],
 )
 def test_unsupported_patterns_are_rejected(pattern):
     assert not compiles(pattern)
     with pytest.raises(UnsupportedPattern):
         PatternConstraint.compile(pattern)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [r"\bfoo\b", r"\Bfoo", r"^\bfoo\b$", r"\b", r"(\b[a-z]+\b)"],
+)
+def test_word_boundary_patterns_compile(pattern):
+    assert compiles(pattern)
+
+
+def test_word_boundary_semantics_matches_re():
+    import itertools
+    import re
+
+    alphabet = "ab1_ "
+    patterns = [r"\bfoo\b", r"\Bfoo", r"\b", r"^\bfoo\b$", r"(\b[A-Z][a-z]+\b)"]
+    strings = ["".join(p) for n in range(5) for p in itertools.product(alphabet, repeat=n)]
+    for pattern in patterns:
+        constr = PatternConstraint.compile(pattern)
+        for text in strings:
+            assert constr.satisfied(text) == (re.search(pattern, text) is not None), (
+                pattern,
+                text,
+            )
+
+
+def test_word_boundary_mask_never_prunes_a_witness():
+    import itertools
+
+    alphabet = "ab1_ "
+    patterns = [r"\bfoo\b", r"\Bfoo", r"\b", r"^\bfoo\b$"]
+    universe = ["".join(p) for n in range(5) for p in itertools.product(alphabet, repeat=n)]
+    extensions = ["".join(p) for n in range(3) for p in itertools.product(alphabet, repeat=n)]
+    for pattern in patterns:
+        constr = PatternConstraint.compile(pattern)
+        for text in universe:
+            if constr.prefix_feasible(text):
+                continue
+            for suffix in extensions:
+                assert not constr.satisfied(text + suffix), (pattern, text, suffix)
 
 
 def test_compile_is_cached_and_immutable_enough():

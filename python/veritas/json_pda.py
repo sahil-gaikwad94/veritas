@@ -61,6 +61,24 @@ class JSONPushdownAutomaton:
     def depth(self):
         return len(self.stack)
 
+    def signature(self) -> tuple[Any, ...] | None:
+        """Canonical signature of everything that affects the future of the parse.
+
+        Two prefixes with the same signature accept exactly the same set of future tokens,
+        regardless of the text processed so far.  Used by the mask cache as a key much
+        cheaper than string comparison over the whole document; ``hash()`` of the seen-key
+        sets is run-local, which is fine for an in-process LRU.
+        """
+
+        if self.state == "error":
+            return None
+        stack_sig = tuple(
+            (frame["type"], len(frame["keys"]), hash(frozenset(frame["keys"])))
+            for frame in self.stack
+        )
+        string_meta = (self._string_role, len(self._string), self._escape, self._unicode_left)
+        return (self.state, stack_sig, self._number, string_meta, self._literal_pos, self._literal)
+
     def reset(self):
         self.__init__(self.max_depth)
 
@@ -324,18 +342,32 @@ class TokenMasker:
             raise JSONSyntaxError(f"invalid JSON prefix: {machine.error}")
         return machine
 
+    def _cache_key(self, prefix, machine):
+        """Canonical cache key: the PDA signature when available, else the raw prefix."""
+
+        if self.schema is None:
+            try:
+                sig = machine.signature()
+            except Exception:
+                sig = None
+            if sig is not None:
+                return sig
+        return prefix
+
     def valid_mask(self, prefix):
-        if prefix in self._cache:
-            self._cache.move_to_end(prefix)
-            return list(self._cache[prefix])
+        """Boolean mask aligned with the vocabulary; every non-JSON-continuation is False."""
+
+        machine = self._state_for(prefix)
+        key = self._cache_key(prefix, machine)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return list(self._cache[key])
         native_mask = None
         if self.schema is None:
-            # The native automaton is an accelerator only: it must agree with the Python one
-            # (tests/test_native_backend.py), and anything unexpected falls back.
             from . import native as _native
             native_mask = _native.mask_or_none(prefix, self.vocabulary, self.eos_token)
         if native_mask is not None:
-            self._cache[prefix] = tuple(native_mask)
+            self._cache[key] = tuple(native_mask)
             if len(self._cache) > self.cache_size:
                 self._cache.popitem(last=False)
             eos_ok = bool(
@@ -347,7 +379,7 @@ class TokenMasker:
                 len(prefix), len(self.vocabulary), sum(native_mask), len(native_mask) - sum(native_mask), eos_ok
             )
             return native_mask
-        base = self._state_for(prefix)
+        base = machine
         # Empty text tokens cannot make progress and must never be sampled as grammar.
         mask = [bool(text) and base.clone().feed(text) for text in self.vocabulary]
         if self.eos_token is not None:
@@ -359,11 +391,13 @@ class TokenMasker:
                     probe.finish()
                     eos_ok = probe.accepts()
             mask[self.eos_token] = eos_ok
-        self._cache[prefix] = tuple(mask)
+        self._cache[key] = tuple(mask)
         if len(self._cache) > self.cache_size:
             self._cache.popitem(last=False)
-        eos_ok = mask[self.eos_token] if self.eos_token is not None and self.eos_token < len(mask) else False
-        self.stats = MaskStats(len(prefix), len(self.vocabulary), sum(mask), len(mask) - sum(mask), eos_ok)
+        self.stats = MaskStats(
+            len(prefix), len(self.vocabulary), sum(mask), len(mask) - sum(mask),
+            bool(self.eos_token is not None and mask[self.eos_token]),
+        )
         return mask
 
     def apply(self, prefix, logits, *, negative=-math.inf):

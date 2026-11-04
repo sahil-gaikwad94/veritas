@@ -400,6 +400,66 @@ class Hc4AffineContractor:
     def _interval_for_var(self, var_id: Any) -> Interval:
         return self.domains.get(var_id, Interval.entire())
 
+    def _revise_dc_constraint(
+        self,
+        var_ids: Sequence[Any],
+        cholesky_l_plus: Sequence[Sequence[float]],
+        cholesky_l_minus: Sequence[Sequence[float]] | None,
+        rhs: float,
+        op: str,
+    ) -> bool:
+        """Forward check for ``xᵀAx op rhs`` in (difference-of) PSD Cholesky form.
+
+        Returns ``True`` when the current box provably violates the constraint (a
+        *refutation*), ``False`` otherwise.  For an indefinite matrix ``A = A₊ − A₋`` we use
+        the difference-of-convex form ``||L₊ᵀx||² − ||L₋ᵀx||²`` with ``A± = L±L±ᵀ`` and only
+        interval arithmetic: the upper bound ``u₋`` of the negative part over the current box
+        is added to ``rhs`` for ``≤``-style constraints (and dually for ``≥``).  This never
+        refutes a box that contains a solution; it can only stay silent.
+        """
+
+        n = len(var_ids)
+        intervals = [self._interval_for_var(vid) for vid in var_ids]
+        y_plus = _apply_lt(intervals, cholesky_l_plus, n)
+        if y_plus is None:
+            return False
+        plus = _sum_square(y_plus)
+        tol = 1e-9 * (1.0 + abs(rhs))
+        if cholesky_l_minus is None:
+            minus_lo = 0.0
+            minus_hi = 0.0
+            total = plus
+        else:
+            if len(cholesky_l_minus) != n:
+                return False
+            y_minus = _apply_lt(intervals, cholesky_l_minus, n)
+            if y_minus is None:
+                return False
+            minus = _sum_square(y_minus)
+            minus_lo = minus.lo
+            minus_hi = minus.hi
+            total = plus.sub(minus)
+        # Full indefinite interval compatibility (necessary condition for feasibility).
+        if op in ("le", "lt", "eq"):
+            if total.lo > rhs + tol:
+                return True
+        if op in ("ge", "gt", "eq"):
+            if total.hi < rhs - tol:
+                return True
+        # Relaxed-PSD bounds using the negative part's box bounds.  For le: any solution
+        # satisfies ||L₊ᵀx||² ≤ rhs + max(||L₋ᵀx||²); for ge it satisfies
+        # ||L₊ᵀx||² ≥ rhs + min(||L₋ᵀx||²).  Violating either value refutes the box.
+        if op in ("le", "lt", "eq"):
+            if plus.lo > rhs + minus_hi + tol:
+                return True
+        if op in ("ge", "gt", "eq"):
+            if plus.hi < rhs + minus_lo - tol:
+                return True
+        if op == "eq":
+            if rhs < total.lo - tol or rhs > total.hi + tol:
+                return True
+        return False
+
     def _revise_constraint(self, cons: Any) -> bool:
         # tuple/list forms
         if isinstance(cons, (tuple, list)):
@@ -539,50 +599,32 @@ class Hc4AffineContractor:
                 # We'll just bound the container variable if possible; skip complex
                 return True
 
-            if kind in ("quad_form", "quad_form_cholesky", "quadratic_form"):
-                # Quadratic contraction: forward check using Cholesky factor.
-                # The constraint is xᵀ A x op rhs where A = Lᵀ L (L is lower triangular).
-                # We compute the interval of the quadratic form and check compatibility.
-                if isinstance(cons, dict):
-                    vars_ = cons.get("vars", [])
-                    cholesky_l = cons.get("cholesky_l", [])
-                    rhs = cons.get("rhs", 0.0)
-                    op = cons.get("op", "eq")
-                else:
-                    # tuple form: ('quad_form_cholesky', vars, cholesky_l, rhs, op)
-                    vars_ = cons[1] if len(cons) > 1 else []
-                    cholesky_l = cons[2] if len(cons) > 2 else []
-                    rhs = cons[3] if len(cons) > 3 else 0.0
+            if kind in ("quad_form", "quad_form_cholesky", "quad_form_split", "quadratic_form", "dc_quadratic_form"):
+                # Quadratic contraction: forward check using (difference-of) Cholesky factor(s).
+                # The constraint is xᵀ A x op rhs where A = L Lᵀ (L lower triangular).
+                # Internally y = Lᵀ x (span of the columns of L), so xᵀ A x = ||y||².
+                # The negative part (indefinite DC form) is bounded soundly with interval
+                # arithmetic; no sign-flipped independent PSD constraints are ever added.
+                # tuple form: ('quadratic_form'|'quad_form_cholesky', vars, l, rhs, op)
+                #            ('dc_quadratic_form', vars, (l_plus, l_minus), rhs, op)
+                vars_ = cons[1] if len(cons) > 1 else []
+                l_arg = cons[2] if len(cons) > 2 else None
+                if kind == "dc_quadratic_form" and isinstance(l_arg, tuple):
+                    cholesky_l_plus, cholesky_l_minus = l_arg
+                    rhs = float(cons[3]) if len(cons) > 3 else 0.0
                     op = cons[4] if len(cons) > 4 else "eq"
-                
-                if vars_ and cholesky_l and len(cholesky_l) == len(vars_):
-                    # Forward check: compute interval of quadratic form
-                    total = Interval(0.0, 0.0)
-                    n = len(vars_)
-                    for i in range(n):
-                        # y_i = Σⱼ L[i][j] * x[j]
-                        y_i = Interval(0.0, 0.0)
-                        for j in range(i + 1):
-                            var = vars_[j]
-                            coeff = cholesky_l[i][j]
-                            if coeff == 0.0:
-                                continue
-                            x_j = self._interval_for_var(var)
-                            y_i = y_i.add(x_j.scale(coeff))
-                        # y_i²
-                        y_i_sq = y_i.sqr()
-                        total = total.add(y_i_sq)
-                    
-                    target = Interval(rhs, rhs)
-                    if op in ("eq", "le", "lt"):
-                        if total.lo > target.hi + 1e-12:
-                            return False
-                    if op in ("eq", "ge", "gt"):
-                        if total.hi < target.lo - 1e-12:
-                            return False
-                    if op == "eq":
-                        if total.lo > target.hi + 1e-12 or total.hi < target.lo - 1e-12:
-                            return False
+                elif kind == "dc_quadratic_form":
+                    cholesky_l_plus = l_arg
+                    cholesky_l_minus = cons[3] if len(cons) > 3 else None
+                    rhs = float(cons[4]) if len(cons) > 4 else 0.0
+                    op = cons[5] if len(cons) > 5 else "eq"
+                else:
+                    cholesky_l_plus, cholesky_l_minus = l_arg, None
+                    rhs = float(cons[3]) if len(cons) > 3 else 0.0
+                    op = cons[4] if len(cons) > 4 else "eq"
+                if vars_ and cholesky_l_plus and len(cholesky_l_plus) == len(vars_):
+                    if self._revise_dc_constraint(vars_, cholesky_l_plus, cholesky_l_minus, rhs, op):
+                        return False
                 return True
 
         # dict form
@@ -594,9 +636,20 @@ class Hc4AffineContractor:
                 return self._revise_constraint(("sum", cons["vars"], cons.get("target", 0.0)))
             if kind in ("linear",):
                 return self._revise_constraint(("linear", cons["coeffs"], cons.get("target", 0.0), cons.get("op", "eq")))
-            if kind in ("quadratic_form",):
-                # Delegate to the tuple form handler above
-                return self._revise_constraint(cons)
+            if kind == "quadratic_form" or kind == "quad_form" or kind == "quad_form_cholesky":
+                cholesky_l = cons.get("cholesky_l", cons.get("cholesky_l_plus"))
+                if cholesky_l is None:
+                    return True
+                return self._revise_constraint(
+                    ("quadratic_form", cons.get("vars", []), cholesky_l,
+                     cons.get("rhs", 0.0), cons.get("op", "eq"))
+                )
+            if kind in ("quad_form_split", "dc_quadratic_form"):
+                return self._revise_constraint(
+                    ("dc_quadratic_form", cons.get("vars", []),
+                     (cons.get("cholesky_l_plus"), cons.get("cholesky_l_minus")),
+                     cons.get("rhs", 0.0), cons.get("op", "eq"))
+                )
 
         # VirExpr (very basic)
         try:
@@ -711,6 +764,43 @@ class Hc4AffineContractor:
 
     def __repr__(self):
         return f"Hc4AffineContractor({self.domains})"
+
+
+def _apply_lt(
+    intervals: list[Interval],
+    factor: Sequence[Sequence[float]],
+    n: int,
+) -> list[Interval] | None:
+    """Compute ``y = Lᵀ x`` with ``x_i`` in ``intervals[i]`` (outward rounding).
+
+    ``L`` is a *lower-triangular* Cholesky factor of a PSD matrix ``A = L Lᵀ``; because
+    ``xᵀ A x = ||Lᵀ x||²`` and ``(Lᵀ x)_i = Σ_{j≥i} L[j][i] x_j``.  Returns ``None`` when the
+    factor shape does not match the variable count.
+    """
+
+    y: list[Interval] = []
+    for i in range(n):
+        acc = Interval(0.0, 0.0)
+        for j in range(i, n):
+            row = factor[j]
+            if i >= len(row):
+                return None
+            coeff = float(row[i])
+            if coeff == 0.0:
+                continue
+            term = intervals[j].mul(Interval(coeff, coeff))
+            acc = acc.add(term)
+        y.append(acc)
+    return y
+
+
+def _sum_square(terms: list[Interval]) -> Interval:
+    """Outward-rounded ``Σ y_i²`` for interval ``y_i``."""
+
+    acc = Interval(0.0, 0.0)
+    for term in terms:
+        acc = acc.add(term.sqr())
+    return acc
 
 
 def _all_finite_feasible(domains: dict[Any, Interval]) -> bool:

@@ -332,6 +332,122 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# export-rl: turn decoder traces into TRL-ready preference data
+# ---------------------------------------------------------------------------
+
+def cmd_export_rl(args: argparse.Namespace) -> int:
+    """Convert a JSONL trace from ``DecodeConfig(rl_trace_path=...)`` into DPO or GRPO data.
+
+    DPO mode emits shared-prefix preference pairs ``{prompt, chosen, rejected, metadata}``;
+    GRPO mode emits dense per-step reward rows ``{prompt, completion, rewards, reward}``.
+    A manifest with counts and SHA-256 is written next to the output.
+    """
+
+    import hashlib
+
+    from ..rl.collector import ConflictBranchRecord, StepRecord, VeritasRLCollector
+
+    collector = VeritasRLCollector()
+    bad_lines = 0
+    with open(args.traces, encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                bad_lines += 1
+                continue
+            if not isinstance(payload, dict):
+                bad_lines += 1
+                continue
+            kind = str(payload.get("kind", "conflict"))
+            if kind == "step":
+                collector.record_step(
+                    StepRecord(
+                        prompt=str(payload.get("prompt", "")),
+                        completion=str(payload.get("completion", "")),
+                        rewards=[float(r) for r in (payload.get("rewards") or [])],
+                        metadata=dict(payload.get("metadata") or {}),
+                    )
+                )
+            else:
+                collector.record_conflict_branch(
+                    None,
+                    None,
+                    payload.get("unsat_core_ids") or payload.get("unsat_core") or [],
+                    record=ConflictBranchRecord(
+                        prefix_tokens=list(payload.get("prefix_tokens") or []),
+                        rejected_clause_tokens=list(payload.get("rejected_clause_tokens") or []),
+                        unsat_core_ids=list(payload.get("unsat_core_ids") or []),
+                        violation_margin=float(payload.get("violation_margin") or 0.0),
+                        prompt=str(payload.get("prompt") or ""),
+                        chosen=str(payload.get("chosen") or ""),
+                        rejected=str(payload.get("rejected") or ""),
+                        metadata=dict(payload.get("metadata") or {}),
+                    ),
+                )
+
+    rows: list[dict[str, Any]] = []
+    if args.format == "dpo":
+        for record in collector.records:
+            if not (record.prompt and record.chosen and record.rejected):
+                continue
+            if record.chosen == record.rejected:
+                continue
+            rows.append(
+                {
+                    "prompt": record.prompt,
+                    "chosen": record.chosen,
+                    "rejected": record.rejected,
+                    "metadata": {
+                        "unsat_core": record.unsat_core_ids,
+                        "violation_margin": record.violation_margin,
+                        **record.metadata,
+                    },
+                }
+            )
+    else:
+        rows = [step.as_dict() for step in collector.steps]
+        if not rows and collector.records:
+            # Derive dense step rewards for conflicts: terminal -1, repair progress bonus.
+            for index, record in enumerate(collector.records):
+                terminal = 1.0 if record.chosen else -5.0
+                rows.append(
+                    StepRecord(
+                        prompt=record.prompt or str(record.prefix_tokens),
+                        completion=record.chosen or record.rejected,
+                        rewards=[terminal, -abs(float(record.violation_margin or 0.0))],
+                        metadata={**record.metadata, "unsat_core": record.unsat_core_ids},
+                    ).as_dict()
+                )
+
+    target = Path(args.out)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    lines = [json.dumps(row, sort_keys=True, default=str) for row in rows]
+    with target.open("w", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(line + "\n")
+            digest.update((line + "\n").encode("utf-8"))
+    manifest = {
+        "format": args.format,
+        "num_records": len(rows),
+        "conflicts": len(collector.records),
+        "steps": len(collector.steps),
+        "bad_lines": bad_lines,
+        "sha256": digest.hexdigest(),
+        "source": str(Path(args.traces)),
+    }
+    manifest_path = target.with_suffix(target.suffix + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"wrote {len(rows)} {args.format.upper()} records to {target}")
+    print(f"manifest: {manifest_path}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # argument parsing
 # ---------------------------------------------------------------------------
 
@@ -371,6 +487,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit 1 when the pure-Python engine is in use (for deployment health checks)",
     )
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("export-rl", help="export decoder traces as TRL DPO/GRPO data")
+    p.add_argument("traces", help="JSONL trace from DecodeConfig(rl_trace_path=...)")
+    p.add_argument("--format", choices=["dpo", "grpo"], required=True)
+    p.add_argument("-o", "--out", required=True, help="output JSONL (+ .manifest.json)")
+    p.set_defaults(func=cmd_export_rl)
 
     p = sub.add_parser("synth", help="infer a schema module from JSON examples")
     p.add_argument("--from-json")

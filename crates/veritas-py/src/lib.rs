@@ -83,11 +83,29 @@ impl PyVocabularyTrie {
     fn tokens_with_prefix(&self, prefix: &str) -> Vec<u32> {
         self.inner.tokens_with_prefix(prefix)
     }
-    
-    /// Fast mask using the trie.
-    #[pyo3(signature = (prefix, vocabulary, eos=None))]
-    fn mask(&self, prefix: &str, vocabulary: Vec<String>, eos: Option<String>) -> Vec<u32> {
-        self.inner.mask(prefix, &vocabulary, eos.as_deref())
+
+    /// Fast mask using the trie.  The vocabulary is owned by the trie, so callers no longer
+    /// clone 128k strings on every decoding step.
+    #[pyo3(signature = (prefix, eos=None))]
+    fn mask(&self, prefix: &str, eos: Option<String>) -> Vec<u32> {
+        self.inner.mask(prefix, eos.as_deref())
+    }
+
+    /// Packed `u64` validity bitset over the full vocabulary (`ceil(|V| / 64)` words):
+    /// masks a logits row with one vectorized AND instead of per-index gathers.
+    #[pyo3(signature = (prefix, eos=None))]
+    fn mask_bitset(&self, prefix: &str, eos: Option<String>) -> Vec<u64> {
+        self.inner.mask_bitset(prefix, eos.as_deref())
+    }
+
+    /// Number of `u64` words `mask_bitset` returns.
+    fn bitset_words(&self) -> usize {
+        self.inner.bitset_words()
+    }
+
+    /// Size of the vocabulary the trie was built from.
+    fn vocabulary_len(&self) -> usize {
+        self.inner.vocabulary_len()
     }
 }
 

@@ -96,6 +96,8 @@ class DecodeConfig:
     auto_scale_numeric_limits: bool = True
     #: Default numeric tolerance for cartridge validators and constraint checks.
     numeric_tolerance: float = 1e-9
+    #: Optional path to a JSONL trace of conflict-branch records for ``veritas export-rl``.
+    rl_trace_path: str | None = None
 
 
 @dataclass
@@ -145,6 +147,12 @@ class DecodeTelemetry:
     preference_repairs: int = 0
     preference_score: float | None = None
     backtracks: int = 0
+    #: Attempts consumed by the engine before producing the returned text.
+    attempts: int = 1
+    #: Sum of ``-log(accepted probability mass)`` accumulated per field (Horizon 4.2):
+    #: the exact KL distortion introduced by hard masking, per JSON field.
+    field_kl_divergence: dict[str, float] = field(default_factory=dict)
+    kl_distortion_tokens: int = 0
     backtrack_fields: list[str] = field(default_factory=list)
     domain_cuts: list[dict[str, Any]] = field(default_factory=list)
     pattern_fallbacks: list[str] = field(default_factory=list)
@@ -189,6 +197,32 @@ class DecodeResult:
             "model": self.model_name,
             "reasoning": self.reasoning,
             "report": self.report.as_dict(),
+        }
+
+    def receipt(self) -> dict[str, Any]:
+        """Self-contained verification receipt: what was produced, by whom, at what cost.
+
+        Contains the content hashes (text + spec), the verification outcome, budget
+        counters (attempts, backtracks, jump-forward fields) and the per-field KL
+        distortion introduced by masking.  For an ed25519 signature attach a
+        :func:`veritas.proof.certificate.build_certificate` proof alongside this receipt.
+        """
+
+        _sha = _sha256_text
+        return {
+            "sha256": _sha(self.text),
+            "spec_digest": self.telemetry.spec_digest,
+            "status": self.report.status,
+            "model": self.model_name,
+            "prompt_sha256": _sha(self.prompt or ""),
+            "attempts": self.attempts,
+            "backtracks": self.telemetry.backtracks,
+            "jump_forward_fields": self.telemetry.jump_forward_fields,
+            "jump_forward_tokens": self.telemetry.jump_forward_tokens,
+            "field_kl_divergence": dict(self.telemetry.field_kl_divergence),
+            "kl_distortion_tokens": self.telemetry.kl_distortion_tokens,
+            "elapsed_ms": round(self.telemetry.elapsed_ms, 3),
+            "verified": bool(self.ok),
         }
 
 
@@ -248,6 +282,8 @@ class VeritasSession:
         self._field_entropy: dict[str, list[float]] = {}
         self._field_tokens: dict[str, str] = {}
         self._conflict_counts: dict[str, int] = {}
+        self._field_kl: dict[str, float] = {}
+        self._kl_steps = 0
         self._clause_fields: dict[int, list[str]] = {}
         for clause in self.clauses:
             names: list[str] = []
@@ -353,52 +389,77 @@ class VeritasSession:
                     contractor.add_constraint(("linear", dict(coeffs), float(rhs), op))
                 except Exception:
                     continue
-            # Also check for quadratic form constraints (quad_form_cholesky and quad_form_split)
-            expr = clause.expr
-            if getattr(expr, "kind", None) in ("quad_form_cholesky", "quad_form_split"):
-                # Extract variable IDs from the args (weights)
-                var_ids = []
-                for arg in getattr(expr, "args", []) or []:
-                    if getattr(arg, "kind", None) == "var":
-                        var_ids.append(arg.var_id)
-                if var_ids and all(vid in contractor.domains for vid in var_ids):
-                    kind = getattr(expr, "kind", None)
-                    if kind == "quad_form_cholesky":
-                        cholesky_factors = [(getattr(expr, "cholesky_l", None), 1.0)]
-                    else:  # quad_form_split
-                        cholesky_factors = [
-                            (getattr(expr, "cholesky_l_plus", None), 1.0),
-                            (getattr(expr, "cholesky_l_minus", None), -1.0),
-                        ]
-                    
-                    for cholesky_l, sign in cholesky_factors:
-                        if cholesky_l is not None and len(cholesky_l) == len(var_ids):
-                            # Validate lower triangular structure
-                            valid = True
-                            for i, row in enumerate(cholesky_l):
-                                if len(row) != i + 1:
-                                    valid = False
-                                    break
-                            if valid:
-                                rhs_val = getattr(clause, "comparison", None)
-                                if rhs_val is not None:
-                                    op, _zero, _tol = rhs_val
-                                    # Get rhs from the comparison
-                                    rhs_expr = expr.rhs if hasattr(expr, "rhs") else None
-                                    if rhs_expr is not None and hasattr(rhs_expr, "value"):
-                                        rhs = float(rhs_expr.value)
-                                    else:
-                                        # Try to get from comparison
-                                        rhs = 0.0
-                                    try:
-                                        contractor.add_constraint((
-                                            "quadratic_form",
-                                            {"vars": var_ids, "cholesky_l": cholesky_l, "rhs": sign * rhs, "op": op}
-                                        ))
-                                    except Exception:
-                                        continue
+            # Quadratic constraints: compare-nodes with a quad_form operand are pushed to the
+            # contractor as (difference-of-)PSD Cholesky constraints.  The negative part of an
+            # indefinite matrix is bounded soundly over the current box (u₋/l₊); we never add
+            # sign-flipped independent PSD constraints (they refute every real box).
+            if getattr(clause.expr, "kind", None) == "compare":
+                spec_constraint = self._quad_demand(clause.expr)
+                if spec_constraint is not None:
+                    var_ids, l_plus, l_minus, rhs, op = spec_constraint
+                    try:
+                        if l_minus is None:
+                            contractor.add_constraint((
+                                "quadratic_form", var_ids, l_plus, rhs, op,
+                            ))
+                        else:
+                            contractor.add_constraint((
+                                "dc_quadratic_form", var_ids, (l_plus, l_minus), rhs, op,
+                            ))
+                    except Exception:
+                        continue
         contractor.propagate()
         return contractor
+
+    @staticmethod
+    def _quad_demand(expr: Any) -> tuple[list[int], Any, Any, float, str] | None:
+        """Extract a DC contract for ``quad_form OP const`` comparisons.
+
+        Returns ``(var_ids, l_plus, l_minus, rhs, op)`` when ``expr`` is exactly a quadratic
+        form compared against a numeric constant; returns ``None`` for anything more complex
+        (nested ``sqrt`` etc.), which the contractor and verifier then handle soundly by staying
+        silent rather than guessing a bound.
+        """
+
+        lhs = getattr(expr, "lhs", None)
+        rhs_expr = getattr(expr, "rhs", None)
+        op = getattr(expr, "op", None)
+        if op is None:
+            return None
+        flip = {"le": "ge", "lt": "gt", "ge": "le", "gt": "lt", "eq": "eq"}
+        quad_node = None
+        const_num = None
+        if getattr(lhs, "kind", None) in ("quad_form_cholesky", "quad_form_split"):
+            quad_node = lhs
+            const_num = as_number(rhs_expr)
+        elif getattr(rhs_expr, "kind", None) in ("quad_form_cholesky", "quad_form_split"):
+            if flip is not None:
+                quad_node = rhs_expr
+                const_num = as_number(lhs)
+                op = flip.get(op, op)
+        if quad_node is None or const_num is None:
+            return None
+        var_ids = [
+            arg.var_id for arg in (getattr(quad_node, "args", []) or [])
+            if getattr(arg, "kind", None) == "var" and isinstance(arg.var_id, int)
+        ]
+        if not var_ids:
+            return None
+        if getattr(quad_node, "kind", None) == "quad_form_cholesky":
+            l_plus = getattr(quad_node, "cholesky_l", None)
+            l_minus = None
+        else:
+            l_plus = getattr(quad_node, "cholesky_l_plus", None)
+            l_minus = getattr(quad_node, "cholesky_l_minus", None)
+        l_plus = _as_factor(l_plus)
+        l_minus = _as_factor(l_minus) if l_minus is not None else None
+        if l_plus is None or (l_minus is None and getattr(quad_node, "kind", None) == "quad_form_split"):
+            return None
+        if l_minus is not None and len(l_minus) != len(var_ids):
+            return None
+        if len(l_plus) != len(var_ids):
+            return None
+        return var_ids, l_plus, l_minus, float(const_num), str(op)
 
     # ------------------------------------------------------------------
     # public API
@@ -419,9 +480,46 @@ class VeritasSession:
         best.reasoning = self.reasoning
         best.mined_equations = list(self.mined_equations)
         best.splices = list(self.splices)
+        if self.config.rl_trace_path:
+            self._write_rl_trace()
         self.telemetry.preference_score = _preference_score(best.report)
         self.telemetry.elapsed_ms = (time.perf_counter() - start) * 1000.0
         return best
+
+    def _write_rl_trace(self) -> None:
+        """Append conflict-branch records (one per backtrack) to the configured JSONL trace.
+
+        Chosen completions are attached when this run ultimately verified; rejected branches
+        are recorded immediately on backtrack so preference pairs exist even on failed runs.
+        """
+
+        path = self.config.rl_trace_path
+        if not path:
+            return
+        import hashlib
+        import json as _json
+        import os
+        import tempfile
+
+        records: list[dict[str, Any]] = []
+        for record in self.rl.records:
+            payload = record.as_dict()
+            payload["kind"] = "conflict"
+            payload["spec_digest"] = self.telemetry.spec_digest
+            if not payload.get("prompt"):
+                payload["prompt"] = self.prompt
+            records.append(payload)
+        if not records:
+            return
+        try:
+            parent = os.path.dirname(path) or "."
+            os.makedirs(parent, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(_json.dumps(record, sort_keys=True, default=str) + "\n")
+        except OSError:
+            # Trace capture must never break a verified generation.
+            return
 
     # ------------------------------------------------------------------
     # CRANE scratchpad
@@ -602,6 +700,8 @@ class VeritasSession:
         self._field_entropy = {}
         self._field_tokens = {}
         self._commit_order = []
+        self._field_kl = {}
+        self._kl_steps = 0
         self.contractor = self._build_contractor()
 
     def _next_step(self) -> int:
@@ -634,6 +734,7 @@ class VeritasSession:
         start: float,
     ) -> DecodeResult:
         self.telemetry.final_status = report.status
+        self.telemetry.attempts = attempts
         self.telemetry.elapsed_ms = (time.perf_counter() - start) * 1000.0
         return DecodeResult(
             text=text,
@@ -1166,7 +1267,14 @@ class VeritasSession:
 
         if len(actions) <= 1:
             return list(actions)
-        logits = self._logits(model, prefix)
+        raw = self._logits(model, prefix)
+        logits = raw
+        distortion = _mask_kl(raw, actions)
+        if distortion > 0.0:
+            self._field_kl[name] = self._field_kl.get(name, 0.0) + distortion
+            self._kl_steps += 1
+            self.telemetry.field_kl_divergence = dict(sorted(self._field_kl.items()))
+            self.telemetry.kl_distortion_tokens = self._kl_steps
         scores: list[tuple[float, int, str]] = []
         for position, action in enumerate(actions):
             score = logits.get(action)
@@ -1522,28 +1630,37 @@ class VeritasSession:
         return adjustments
 
     def _pick(self, field_name: str, model: Any, prefix: str, actions: Sequence[str], candidates: int = 0) -> str:
-        logits = self._logits(model, prefix)
+        raw = self._logits(model, prefix)
+        logits = raw
         scores = [float(logits.get(action, 0.0)) for action in actions]
         if self.config.volume_twist_beta:
             adjustments = self._volume_twist(field_name, prefix, actions)
             if any(adjustments):
                 scores = [score + delta for score, delta in zip(scores, adjustments)]
-        entropy, choice = self._select(actions, scores)
+        entropy, choice = self._select(field_name, actions, scores, raw=raw)
         self.telemetry.masked_candidates += max(0, candidates - len(actions)) if candidates else 0
         self.telemetry.sampled_units += 1
         self._last_entropy = entropy
         return choice
 
     def _pick_strings(self, field_name: str, model: Any, actions: Sequence[str]) -> str:
-        logits = self._logits(model, self.text)
+        raw = self._logits(model, self.text)
+        logits = raw
         scores = [float(logits.get(action, 0.0)) for action in actions]
-        entropy, choice = self._select(actions, scores)
+        entropy, choice = self._select(field_name, actions, scores, raw=raw)
         self._last_entropy = entropy
         return choice
 
-    def _select(self, actions: Sequence[str], scores: Sequence[float]) -> tuple[float, str]:
+    def _select(self, field_name: str, actions: Sequence[str], scores: Sequence[float],
+                raw: Mapping[str, float] | None = None) -> tuple[float, str]:
         probabilities = _softmax(scores)
         entropy = _entropy(probabilities)
+        distortion = _mask_kl(raw, actions)
+        if distortion > 0.0 and field_name:
+            self._field_kl[field_name] = self._field_kl.get(field_name, 0.0) + distortion
+            self._kl_steps += 1
+            self.telemetry.field_kl_divergence = dict(sorted(self._field_kl.items()))
+            self.telemetry.kl_distortion_tokens = self._kl_steps
         if self.config.temperature <= 0:
             best = max(range(len(actions)), key=lambda i: (scores[i], -i))
             return entropy, actions[best]
@@ -1781,6 +1898,28 @@ class VeritasSession:
 # helpers
 # ---------------------------------------------------------------------------
 
+def _as_factor(value: Any) -> list[list[float]] | None:
+    """Validate/coerce a Cholesky factor matrix (ragged rows rejected)."""
+
+    try:
+        rows = list(value) if value is not None else []
+        out: list[list[float]] = []
+        for row in rows:
+            items = list(row)
+            out.append([float(v) for v in items])
+    except (TypeError, ValueError):
+        return None
+    if not out:
+        return None
+    n = len(out)
+    # Full or lower-triangular factors are both accepted; entries must be finite.
+    if any(not math.isfinite(v) for row in out for v in row):
+        return None
+    if any(len(row) > n for row in out):
+        return None
+    return out
+
+
 def _has_tokenizer(tokenizer: Any) -> bool:
     if tokenizer is None:
         return False
@@ -1858,6 +1997,33 @@ def _unary_preference(expr: Any, spec: VirSpec) -> tuple[str | None, str, float]
     return None, op, 0.0
 
 
+def _mask_kl(raw: Mapping[str, float] | None, actions: Sequence[str]) -> float:
+    """``-log(accepted probability mass)`` for the raw model distribution.
+
+    Let ``P_raw`` be the model's softmax over the emitted logits and ``A`` the allowed
+    actions after masking.  The distortion introduced by hard masking at this step is
+    exactly ``-log(P_raw(A))``: the lost probability mass.  Models that only emit the
+    allowed candidates see zero distortion; full-vocabulary logits measure true drift.
+    """
+
+    if not raw or not actions:
+        return 0.0
+    finite = [float(v) for v in raw.values() if isinstance(v, (int, float)) and math.isfinite(float(v))]
+    if not finite:
+        return 0.0
+    peak = max(finite)
+    total = sum(math.exp(v - peak) for v in finite)
+    accepted = 0.0
+    for action in actions:
+        value = raw.get(action)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            accepted += math.exp(float(value) - peak)
+    if total <= 0.0 or accepted <= 0.0:
+        return 0.0
+    mass = min(1.0, accepted / total)
+    return -math.log(mass)
+
+
 def _softmax(scores: Sequence[float]) -> list[float]:
     if not scores:
         return []
@@ -1899,6 +2065,7 @@ def generate(
     max_preference_repairs: int | None = None,
     seed: int | None = None,
     token_healing: bool = True,
+    rl_trace_path: str | None = None,
     **kwargs: Any,
 ) -> VerifiedResult:
     """Run constrained decoding for ``spec`` and return a verified result.
@@ -1933,6 +2100,8 @@ def generate(
         cfg.reasoning_mode = reasoning_mode
     if max_preference_repairs is not None:
         cfg.max_preference_repairs = max(0, int(max_preference_repairs))
+    if rl_trace_path is not None:
+        cfg.rl_trace_path = str(rl_trace_path)
     if seed is not None:
         cfg.seed = seed
     session = VeritasSession(

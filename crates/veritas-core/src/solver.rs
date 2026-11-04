@@ -49,6 +49,9 @@ struct Row {
     coeffs: BTreeMap<u32, Rational>,
     bound: Rational,
     strict: bool,
+    /// Ancestor bitmask of the original constraints this row was combined from.
+    /// Tracked so FM can apply Kohler's redundant-inequality pruning in O(1).
+    sources: u64,
 }
 
 impl Row {
@@ -57,6 +60,7 @@ impl Row {
             coeffs: BTreeMap::new(),
             bound: Rational::ZERO,
             strict: false,
+            sources: 0,
         }
     }
 
@@ -97,7 +101,7 @@ fn rat(value: f64) -> Res<Rational> {
 
 fn rows_from(constraints: &[Linear]) -> Res<Vec<Row>> {
     let mut rows: Vec<Row> = Vec::with_capacity(constraints.len());
-    for constraint in constraints {
+    for (index, constraint) in constraints.iter().enumerate() {
         let (sign, strict) = match constraint.op {
             CmpOp::Le => (1.0, false),
             CmpOp::Lt => (1.0, true),
@@ -107,6 +111,8 @@ fn rows_from(constraints: &[Linear]) -> Res<Vec<Row>> {
             other => return Err(format!("'{}' is not a linear comparison", other.symbol())),
         };
         let mut row = Row::new();
+        // Up to 64 constraints (enforced by callers); bit `index` is this constraint's lineage.
+        row.sources = 1u64 << index;
         for (var, coeff) in &constraint.coeffs {
             let scaled = rat(*coeff * sign)?;
             let merged = match row.coeffs.get(var) {
@@ -131,13 +137,14 @@ fn rows_from(constraints: &[Linear]) -> Res<Vec<Row>> {
             }
             mirror.bound = row.bound.neg();
             mirror.strict = false;
+            mirror.sources = row.sources;
             rows.push(mirror);
         }
     }
     Ok(rows)
 }
 
-fn eliminate(rows: &[Row], var: u32) -> Res<Vec<Row>> {
+fn eliminate(rows: &[Row], var: u32, step: usize) -> Res<Vec<Row>> {
     let mut positive: Vec<&Row> = Vec::new();
     let mut negative: Vec<&Row> = Vec::new();
     let mut rest: Vec<Row> = Vec::new();
@@ -161,6 +168,12 @@ fn eliminate(rows: &[Row], var: u32) -> Res<Vec<Row>> {
             .get(&var)
             .ok_or_else(|| "internal: missing coefficient".to_string())?;
         for right in &negative {
+            // Kohler's redundant-inequality pruning: after k variables have been eliminated,
+            // any row whose lineage contains more than k + 2 source constraints is a redundant
+            // combination and can be dropped.  Bitwise and O(1).
+            if (left.sources | right.sources).count_ones() as usize > step + 2 {
+                continue;
+            }
             let right_coeff = *right
                 .coeffs
                 .get(&var)
@@ -169,6 +182,8 @@ fn eliminate(rows: &[Row], var: u32) -> Res<Vec<Row>> {
             combined.add_scaled(left, right_coeff.neg())?;
             combined.add_scaled(right, left_coeff)?;
             combined.coeffs.remove(&var);
+            // Lineage carries forward for the next elimination step.
+            combined.sources = left.sources | right.sources;
             rest.push(combined);
         }
     }
@@ -177,11 +192,11 @@ fn eliminate(rows: &[Row], var: u32) -> Res<Vec<Row>> {
 
 fn eliminate_all(rows: &[Row], order: &[u32]) -> Res<Vec<Row>> {
     let mut current = rows.to_vec();
-    for var in order {
+    for (step, var) in order.iter().enumerate() {
         if current.len() > MAX_ROWS {
             return Err("system blowup".to_string());
         }
-        current = eliminate(&current, *var)?;
+        current = eliminate(&current, *var, step)?;
     }
     Ok(current)
 }

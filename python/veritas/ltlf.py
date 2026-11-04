@@ -257,6 +257,21 @@ def eventually(predicate: Any) -> Formula:
     return Eventually(_as_formula(predicate, "eventually"))
 
 
+def implies(first: Any, second: Any) -> Formula:
+    """``first -> second`` as a finite-trace formula (``false -> q`` is vacuously true)."""
+
+    return Or(Not(_as_formula(first, "implies-lhs")), _as_formula(second, "implies-rhs"))
+
+
+def negate(formula: Any) -> Formula:
+    return Not(_as_formula(formula, "not"))
+
+
+def conjunction(*formulas: Any) -> Formula:
+    parts = [_as_formula(item, "and") for item in formulas]
+    return And(*parts)
+
+
 def never(name: Any) -> Formula:
     if isinstance(name, str):
         return Never(name)
@@ -277,6 +292,9 @@ def at_most(name: str, limit: int) -> Formula:
 
 def occurred(name: str) -> Formula:
     return Occurred(name)
+
+
+once = occurred  # alias: ``_as_formula`` accepts any name string the same way
 
 
 def evaluate(formula: Any, target: Any) -> bool:
@@ -301,9 +319,13 @@ __all__ = [
     "always",
     "at_most",
     "before",
+    "conjunction",
     "evaluate",
     "eventually",
+    "implies",
+    "negate",
     "never",
     "occurred",
+    "once",
     "responds",
 ]
