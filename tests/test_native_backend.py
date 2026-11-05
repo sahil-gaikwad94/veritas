@@ -4,7 +4,7 @@ These tests run in two modes:
 
 * without the compiled extension (the default wheel) they prove the shim falls back and that
   the reported reason is honest, and the parity assertions are skipped;
-* with ``veritas_py`` importable (the wheels job) they prove the native answers agree with the
+* with ``vexx_py`` importable (the wheels job) they prove the native answers agree with the
   pure-Python ones on a corpus, so preferring the native path cannot change any verdict.
 """
 
@@ -14,9 +14,9 @@ import math
 
 import pytest
 
-from veritas import native
-from veritas.interval import Interval
-from veritas.json_pda import JSONPushdownAutomaton, JSONSyntaxError, TokenMasker
+from vexx import native
+from vexx.interval import Interval
+from vexx.json_pda import JSONPushdownAutomaton, JSONSyntaxError, TokenMasker
 
 PREFIXES = [
     "",
@@ -66,7 +66,7 @@ EOS = VOCABULARY.index("")
 
 requires_native = pytest.mark.skipif(
     not native.available(),
-    reason=f"veritas_py not built ({native.load_error()})",
+    reason=f"vexx_py not built ({native.load_error()})",
 )
 
 
@@ -83,7 +83,7 @@ def test_shim_reports_whether_the_extension_loaded():
     info = native.info()
     assert info["native_available"] is native.available()
     if native.available():
-        assert info["name"] == "veritas_py"
+        assert info["name"] == "vexx_py"
         assert info["load_error"] is None
         assert native.wire_version() == 1
     else:
@@ -209,15 +209,15 @@ def test_numeric_prefix_fallback_is_still_sound():
 
 
 def test_doctor_reports_the_loaded_engine():
-    import veritas
+    import vexx
 
-    report = veritas.doctor()
-    assert report["version"] == veritas.__version__
+    report = vexx.doctor()
+    assert report["version"] == vexx.__version__
     assert report["python"] == ("accelerated" if native.available() else "pure")
     assert report["engine"]["native_available"] is native.available()
     if not native.available():
         assert report["engine"]["load_error"]
-    assert veritas.native is native
+    assert vexx.native is native
 
 
 def test_kill_switch_forces_the_pure_path(monkeypatch):
@@ -349,7 +349,7 @@ def _random_vocabulary(rng) -> list[str]:
 
 @requires_native
 def test_random_prefixes_agree_with_the_reference_automaton():
-    extension = pytest.importorskip("veritas_py")
+    extension = pytest.importorskip("vexx_py")
     rng = _differential_rng()
     verdicts = {"complete": 0, "incomplete": 0, "invalid": 0}
     for _ in range(600):
@@ -392,7 +392,7 @@ def _same_interval(lo, hi, other_lo, other_hi) -> bool:
 
 @requires_native
 def test_random_numeric_prefixes_agree_with_the_reference():
-    extension = pytest.importorskip("veritas_py")
+    extension = pytest.importorskip("vexx_py")
     rng = _differential_rng()
     non_empty = 0
     for _ in range(500):
@@ -469,7 +469,7 @@ def test_a_native_crash_degrades_to_the_reference_path(monkeypatch):
     assert span.lo <= 0.3 <= span.hi
     assert native.contract({0: (0.0, 1.0)}, []) is None
     assert native.solve_linear([]) is None
-    assert native.info()["name"] == "veritas_py"
+    assert native.info()["name"] == "vexx_py"
 
 
 def test_the_fallback_still_lets_ctrl_c_through(monkeypatch):

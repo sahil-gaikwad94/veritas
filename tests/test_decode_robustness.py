@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import veritas as vt
-from veritas.decode import DecodeConfig, VeritasSession
+import vexx as vt
+from vexx.decode import DecodeConfig, VexxSession
 
 HIGH_FIRST = vt.MockCharModel()
 LOW_FIRST = vt.MockCharModel(digit_order="0123456789")
@@ -170,7 +170,7 @@ def test_open_element_bounds_are_enforced_for_integers():
 
 
 def test_element_exclusivity_reaches_the_container_analysis():
-    session = VeritasSession(open_list_spec, LOW_FIRST, DecodeConfig())
+    session = VexxSession(open_list_spec, LOW_FIRST, DecodeConfig())
     info = session.containers["xs"]
     assert info.elem_min == pytest.approx(0.2)
     assert info.elem_max == pytest.approx(0.4)
@@ -220,7 +220,7 @@ def test_unsupported_pattern_falls_back_honestly():
     def insensitive_spec(p: Insensitive):
         vt.require(p.s != "")
 
-    session = VeritasSession(insensitive_spec, LOW_FIRST, DecodeConfig())
+    session = VexxSession(insensitive_spec, LOW_FIRST, DecodeConfig())
     result = session.run(LOW_FIRST)
     assert result.telemetry.pattern_fallbacks
     assert any("case-insensitive" in entry for entry in result.telemetry.pattern_fallbacks)
@@ -230,7 +230,7 @@ def test_unsupported_pattern_falls_back_honestly():
 
 
 def test_vir_round_trips_pattern_and_format():
-    from veritas.serde import spec_from_dict, spec_to_dict
+    from vexx.serde import spec_from_dict, spec_to_dict
 
     restored = spec_from_dict(spec_to_dict(coded_spec.spec))
     vtype = restored.variables[restored.name_to_id["code"]]["type"]
@@ -349,7 +349,7 @@ def derived_spec(p: Derived):
 
 
 def test_zero_dof_field_is_spliced_without_sampling():
-    session = VeritasSession(derived_spec, HIGH_FIRST, DecodeConfig())
+    session = VexxSession(derived_spec, HIGH_FIRST, DecodeConfig())
     result = session.run(HIGH_FIRST)
     assert result.ok, result.report.summary_line()
     assert result.telemetry.jump_forward_fields == 1
@@ -378,7 +378,7 @@ def test_token_healing_is_disabled_without_a_tokenizer():
 def test_number_search_backtracks_within_a_field():
     """A greedy literal (0.4) must be abandoned for a feasible sibling (0.3)."""
 
-    session = VeritasSession(open_list_spec, HIGH_FIRST, DecodeConfig())
+    session = VexxSession(open_list_spec, HIGH_FIRST, DecodeConfig())
     result = session.run(HIGH_FIRST)
     assert result.ok, result.report.summary_line()
     assert all(0.2 < value < 0.4 for value in result.values["xs"])
@@ -396,7 +396,7 @@ def half_box_spec(p: HalfBox):
 
 @pytest.mark.parametrize("model", [HIGH_FIRST, LOW_FIRST])
 def test_no_phantom_domain_cut_for_feasible_specs(model):
-    session = VeritasSession(half_box_spec, model, DecodeConfig())
+    session = VexxSession(half_box_spec, model, DecodeConfig())
     result = session.run(model)
     assert result.ok, result.report.summary_line()
     assert 0.0 < result.values["x"] < 1.0
@@ -413,7 +413,7 @@ def test_domain_cut_is_recorded_with_culprit_and_bounds():
     def product_spec(p: Product):
         vt.require(p.a * p.b <= 0.1, tol=1e-6)
 
-    session = VeritasSession(product_spec, HIGH_FIRST, DecodeConfig())
+    session = VexxSession(product_spec, HIGH_FIRST, DecodeConfig())
     result = session.run(HIGH_FIRST)
     assert result.ok, result.report.summary_line()
     assert result.telemetry.backtracks >= 1
@@ -454,7 +454,7 @@ def test_preflight_produces_a_checked_witness_for_pattern_strings():
 
 
 def test_pattern_witness_respects_the_length_window():
-    from veritas.pattern import PatternConstraint
+    from vexx.pattern import PatternConstraint
 
     constraint = PatternConstraint.compile(r"^[a-z]+$")
     witness = constraint.witness(min_length=6, max_length=8)

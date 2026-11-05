@@ -1,6 +1,6 @@
 # Benchmarks
 
-Veritas benchmarks must report hardware, sample count, correctness failures, and latency
+Vexx benchmarks must report hardware, sample count, correctness failures, and latency
 distributions. A mock-model smoke run is a reproducibility check, **not** a speedup claim.
 
 ## Decode smoke
@@ -19,7 +19,7 @@ Example run in the audit environment (30 iterations, Python 3.11.2,
 ```json
 {
   "benchmark": "decode_smoke",
-  "model": "veritas.testing.MockCharModel",
+  "model": "vexx.testing.MockCharModel",
   "iterations": 30,
   "failures": 0,
   "latency_ms": { "p50": 1.022, "p95": 1.289, "max": 1.512, "mean": 1.063 }
@@ -32,7 +32,7 @@ script's own `python`/`platform` fields):
 ```json
 {
   "benchmark": "decode_smoke",
-  "model": "veritas.testing.MockCharModel",
+  "model": "vexx.testing.MockCharModel",
   "iterations": 100,
   "failures": 0,
   "latency_ms": { "p50": 1.053, "p95": 1.193, "max": 2.279, "mean": 1.087 },
@@ -53,14 +53,14 @@ KV-cache surgery. For the native engine, see the A/B below.
 ## Native engine: measured, not claimed
 
 `benchmarks/native_speedup.py` runs **the same Python call sites twice**, once with the
-compiled extension and once with `VERITAS_NO_NATIVE=1`, and reports median/p95 per call for
+compiled extension and once with `VEXX_NO_NATIVE=1`, and reports median/p95 per call for
 each. Nothing is re-implemented for the benchmark: the workloads are `TokenMasker.valid_mask`
 (605-token JSON vocabulary, cache cleared so each call does real work) and
 `Interval.from_numeric_prefix` (160 literals spanning `0.3`, `00`, `1e-3`, `-7.5`). Each side
 runs in its own subprocess so import-time state cannot leak between them.
 
 ```console
-$ maturin build --release -m crates/veritas-py/Cargo.toml -o dist
+$ maturin build --release -m crates/vexx-py/Cargo.toml -o dist
 $ pip install --no-deps dist/*.whl
 $ python benchmarks/native_speedup.py            # table
 $ python benchmarks/native_speedup.py --json     # machine-readable
@@ -86,10 +86,10 @@ modest second number: it is never *slower*, and it becomes the dominant win in t
 it matters.
 
 These are wall-clock medians on shared runners and vary by tens of percent between runs. They
-answer "is the accelerator wired up and worth its boundary cost", not "how fast is Veritas".
+answer "is the accelerator wired up and worth its boundary cost", not "how fast is Vexx".
 
 Two honest caveats: the per-call Python↔Rust boundary costs a fraction of a microsecond, so
 cheap calls (short numeric prefixes) may gain little or nothing from delegation — the win is in
 per-token loops; and these figures are wall-clock medians on shared CI runners, which vary by
 tens of percent between runs. The numbers answer "is the accelerator wired up and worth its
-boundary cost", not "how fast is Veritas".
+boundary cost", not "how fast is Vexx".

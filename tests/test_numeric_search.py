@@ -16,9 +16,9 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import veritas as vt
-from veritas.decode import DecodeConfig, VeritasSession
-from veritas.interval import Interval
+import vexx as vt
+from vexx.decode import DecodeConfig, VexxSession
+from vexx.interval import Interval
 
 
 class Box(BaseModel):
@@ -56,7 +56,7 @@ def test_every_accepted_stop_point_satisfies_the_constraints():
     affine clause ``2x <= 1`` reaches the numeric mask.
     """
 
-    session = VeritasSession(half_box, vt.MockCharModel(), DecodeConfig())
+    session = VexxSession(half_box, vt.MockCharModel(), DecodeConfig())
     session._reset_attempt()
     lo, hi = session._bounds("x")
     interval = Interval(lo, hi)
@@ -83,7 +83,7 @@ def test_every_accepted_stop_point_satisfies_the_constraints():
 def test_accepted_prefixes_are_actually_extendable():
     """A masked prefix must be completable; otherwise the mask lies to the model."""
 
-    session = VeritasSession(half_box, vt.MockCharModel(), DecodeConfig())
+    session = VexxSession(half_box, vt.MockCharModel(), DecodeConfig())
     session._reset_attempt()
     for length in range(1, 4):
         for prefix in itertools.product(CHARSET, repeat=length):
@@ -107,7 +107,7 @@ def test_accepted_prefixes_are_actually_extendable():
 @pytest.mark.parametrize("seed", range(8))
 def test_random_models_terminate_and_never_emit_unsound_values(seed):
     model = vt.RandomCharModel(seed=seed, stop_logit=1.0)
-    session = VeritasSession(ratio_spec, model, DecodeConfig(max_backtracks=6), tokenizer=None)
+    session = VexxSession(ratio_spec, model, DecodeConfig(max_backtracks=6), tokenizer=None)
     result = session.run(model)
     if result.report.status == "PASS":
         assert abs(result.values["a"] + result.values["b"] - 1.0) <= 1e-6

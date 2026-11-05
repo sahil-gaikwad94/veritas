@@ -7,14 +7,14 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-import veritas as vt
-from veritas.bridges.async_stream_proxy import AsyncStreamSupervisor, StreamViolation
-from veritas.bridges.diffusion_bridge import DiffusionBridge, gumbel_max_sample, unmask_order
-from veritas.bridges.hf_transformers import VeritasLogitsProcessor
-from veritas.bridges.instructor_bridge import VerificationError, patch_openai
-from veritas.bridges.llamacpp_bridge import patch_llamacpp
-from veritas.bridges.sglang_bridge import patch_sglang
-from veritas.bridges.vllm_bridge import patch_vllm
+import vexx as vt
+from vexx.bridges.async_stream_proxy import AsyncStreamSupervisor, StreamViolation
+from vexx.bridges.diffusion_bridge import DiffusionBridge, gumbel_max_sample, unmask_order
+from vexx.bridges.hf_transformers import VexxLogitsProcessor
+from vexx.bridges.instructor_bridge import VerificationError, patch_openai
+from vexx.bridges.llamacpp_bridge import patch_llamacpp
+from vexx.bridges.sglang_bridge import patch_sglang
+from vexx.bridges.vllm_bridge import patch_vllm
 
 
 class Linear(BaseModel):
@@ -48,7 +48,7 @@ class FakeTokenizer:
 
 def test_hf_processor_masks_invalid_tokens_and_allows_eos():
     tokenizer = FakeTokenizer()
-    processor = VeritasLogitsProcessor(tokenizer, spec=linear)
+    processor = VexxLogitsProcessor(tokenizer, spec=linear)
     scores = [1.0] * 7
     processor([], scores)
     assert scores[0] > float("-inf")  # '{'
@@ -59,7 +59,7 @@ def test_hf_processor_masks_invalid_tokens_and_allows_eos():
     partial = [1.0] * 7
     processor([0, 1, 2, 3, 4], partial)  # {"a": 1}
     assert partial[6] == float("-inf")
-    grammar_only = VeritasLogitsProcessor(tokenizer, spec=None)
+    grammar_only = VexxLogitsProcessor(tokenizer, spec=None)
     done = [1.0] * 7
     grammar_only([0, 1, 2, 3, 4], done)  # {"a": 1}
     assert done[6] == 1.0
@@ -76,7 +76,7 @@ def test_host_adapters_attach_processors():
     model = SimpleNamespace(set_logits_processor=lambda p: attached.setdefault("p", p))
     patch_llamacpp(model, linear, tokenizer)
     assert attached["p"] is not None
-    assert model.veritas_grammar.startswith("root")
+    assert model.vexx_grammar.startswith("root")
 
     sglang = SimpleNamespace(logits_processor=[])
     patch_sglang(sglang, linear, tokenizer)
@@ -157,10 +157,10 @@ def test_openai_proxy_verifies_valid_response_and_injects_spec():
     client = _FakeClient('{"a": 0.25, "b": 0.75}')
     proxy = patch_openai(client, spec=linear)
     response = proxy.chat.completions.create(model="fake", messages=[])
-    assert response.veritas_report.status == "PASS"
+    assert response.vexx_report.status == "PASS"
     call = client.completions.calls[0]
     assert call["response_format"]["type"] == "json_schema"
-    assert "veritas_vir" in call["extra_body"]
+    assert "vexx_vir" in call["extra_body"]
 
 
 def test_openai_proxy_rejects_invalid_response():

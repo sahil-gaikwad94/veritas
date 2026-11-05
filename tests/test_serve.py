@@ -1,4 +1,4 @@
-"""Live tests for `veritas serve` — a verification reverse proxy in front of an upstream.
+"""Live tests for `vexx serve` — a verification reverse proxy in front of an upstream.
 
 The fixture spawns the upstream stub *and* the proxy as one subprocess (the proxy is a
 service, after all), waits for its ``READY`` marker, exercises it over HTTP, then terminates
@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.serve import SpecRegistry, _parse_json_candidate  # noqa: E402
+from vexx.serve import SpecRegistry, _parse_json_candidate  # noqa: E402
 
 SPEC_MODULE = Path(__file__).parent / "serve_spec_fixture.py"
 
@@ -94,7 +94,7 @@ def main():
     up.content = content
     threading.Thread(target=up.serve_forever, daemon=True).start()
 
-    from veritas.serve import serve
+    from vexx.serve import serve
     proxy = serve(
         f"http://127.0.0.1:{upstream_port}/v1",
         spec_module=spec_module,
@@ -158,9 +158,9 @@ class _LiveServe:
 
 @pytest.fixture(scope="module")
 def spec_file(tmp_path_factory) -> Path:
-    target = tmp_path_factory.mktemp("veritas-serve") / "serve_spec_fixture.py"
+    target = tmp_path_factory.mktemp("vexx-serve") / "serve_spec_fixture.py"
     target.write_text(
-        "import veritas as vt\n"
+        "import vexx as vt\n"
         "from pydantic import BaseModel, Field\n"
         "\n"
         "class Followup(BaseModel):\n"
@@ -193,7 +193,7 @@ def _body(spec: str = "followup"):
     return {
         "model": "stub",
         "messages": [{"role": "user", "content": "answer as json"}],
-        "extra_body": {"veritas_spec": spec},
+        "extra_body": {"vexx_spec": spec},
     }
 
 
@@ -210,9 +210,9 @@ def test_healthz_reports_specs(passing_stack):
 def test_nonstreaming_pass_attaches_certificate(passing_stack):
     status, headers, body = passing_stack.post(_body())
     assert status == 200
-    assert headers.get("X-Veritas-Verification") == "pass"
+    assert headers.get("X-Vexx-Verification") == "pass"
     parsed = json.loads(body)
-    certificate = parsed.get("veritas_certificate")
+    certificate = parsed.get("vexx_certificate")
     assert certificate and certificate["status"] == "PASS"
     assert len(certificate["sha256"]) == 64
     assert certificate["spec_digest"]
@@ -221,10 +221,10 @@ def test_nonstreaming_pass_attaches_certificate(passing_stack):
 def test_nonstreaming_fail_returns_422_with_violations(failing_stack):
     status, headers, body = failing_stack.post(_body())
     assert status == 422
-    assert headers.get("X-Veritas-Verification") == "fail"
+    assert headers.get("X-Vexx-Verification") == "fail"
     parsed = json.loads(body)
-    assert parsed["error"]["type"] == "veritas_verification_failed"
-    assert parsed["veritas_certificate"]["status"] == "FAIL"
+    assert parsed["error"]["type"] == "vexx_verification_failed"
+    assert parsed["vexx_certificate"]["status"] == "FAIL"
 
 
 def test_streaming_injects_certificate_before_done(passing_stack):
@@ -232,7 +232,7 @@ def test_streaming_injects_certificate_before_done(passing_stack):
     assert status == 200
     text = raw.decode()
     assert "chat.completion.chunk" in text
-    assert "veritas_certificate" in text
+    assert "vexx_certificate" in text
     assert text.rstrip().endswith("[DONE]")
 
 

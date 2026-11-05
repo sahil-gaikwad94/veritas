@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 *.pyo
-.veritas/
+.vexx/
 .venv/
 .pytest_cache/
 traces/
@@ -17,4 +17,4 @@ wheelhouse/
 *.so
 *.dylib
 *.pyd
-/veritas
+/vexx

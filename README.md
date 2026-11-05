@@ -1,8 +1,8 @@
-# <img src="docs/assets/veritas-logo.svg" alt="Veritas logo" width="32" height="32" align="top" /> Veritas
+# <img src="docs/assets/vexx-logo.svg" alt="Vexx logo" width="32" height="32" align="top" /> Vexx
 
 **Solver-guided generation you can verify.**
 
-Veritas turns a Python/Pydantic schema plus a small constraint DSL into a compiled
+Vexx turns a Python/Pydantic schema plus a small constraint DSL into a compiled
 specification, then enforces it at every layer of generation: a JSON grammar PDA masks
 tokens, interval/affine contractors prune numeric domains, zero-degree-of-freedom fields
 are spliced without sampling, CDCL-style conflict analysis backtracks, and every returned
@@ -10,16 +10,16 @@ instance is verified concretely before it reaches you — shipping with a self-c
 proof certificate.
 
 Pure Python reference engine with an optional dependency-free Rust accelerator
-(`crates/veritas-core`), PyPI installable, Apache-2.0.
+(`crates/vexx-core`), PyPI installable, Apache-2.0.
 
 <div align="center">
 
-[![PyPI version](https://img.shields.io/pypi/v/veritas-ai?label=PyPI&color=6366f1)](https://pypi.org/project/veritas-ai/)
-[![Python](https://img.shields.io/pypi/pyversions/veritas-ai?label=Python&color=a855f7)](https://pypi.org/project/veritas-ai/)
+[![PyPI version](https://img.shields.io/pypi/v/vexx-ai?label=PyPI&color=6366f1)](https://pypi.org/project/vexx-ai/)
+[![Python](https://img.shields.io/pypi/pyversions/vexx-ai?label=Python&color=a855f7)](https://pypi.org/project/vexx-ai/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![CI](https://img.shields.io/github/actions/workflow/status/sahil-gaikwad94/veritas../ci.yml?label=CI)](https://github.com/sahil-gaikwad94/veritas../actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/sahil-gaikwad94/vexx../ci.yml?label=CI)](https://github.com/sahil-gaikwad94/vexx../actions)
 [![Rust accelerator](https://img.shields.io/badge/native-Rust%20accelerator-059669)](docs/NATIVE.md)
-[![GitHub stars](https://img.shields.io/github/stars/sahil-gaikwad94/veritas..?style=social)](https://github.com/sahil-gaikwad94/veritas..)
+[![GitHub stars](https://img.shields.io/github/stars/sahil-gaikwad94/vexx..?style=social)](https://github.com/sahil-gaikwad94/vexx..)
 
 [Install](#install) • [Features](#features) • [Quick start](#quick-start) • [Examples](#examples) • [Architecture](#architecture) • [Docs](#docs)
 
@@ -29,7 +29,7 @@ Pure Python reference engine with an optional dependency-free Rust accelerator
 
 ## Table of contents
 
-- [What Veritas does](#what-veritas-does)
+- [What Vexx does](#what-vexx-does)
 - [✨ Features](#-features)
 - [📦 Install](#-install)
 - [🚀 Quick start](#-quick-start)
@@ -42,15 +42,15 @@ Pure Python reference engine with an optional dependency-free Rust accelerator
 - [🖥️ Command line](#-command-line)
 - [🧪 Testing & CI](#-testing--ci)
 - [⚠️ Status and limits](#-status-and-limits)
-- [🤝 Use Veritas if](#-use-veritas-if)
+- [🤝 Use Vexx if](#-use-vexx-if)
 - [🔗 Links](#-links)
 - [📄 License](#-license)
 
 ---
 
-## What Veritas does
+## What Vexx does
 
-Most LLM generators produce JSON and *hope* it matches your schema. Veritas does the
+Most LLM generators produce JSON and *hope* it matches your schema. Vexx does the
 opposite: it starts from a schema you trust and constrains decoding so the model can only
 emit valid instances — then proves it.
 
@@ -78,22 +78,22 @@ The result: structured generation that cannot lie, with an audit trail you can f
 | ↩️ **CDCL backtracking** | Conflict-directed jumpback and tabu prefixes recover from dead ends instead of failing the whole attempt. |
 | ⚡ **0-DoF splicing** | Ready fields derived and spliced without sampling; canonical JSON Jump-Forward splices. |
 | 📜 **Proof certificates** | Self-contained SMT-LIB2 + witness certificates with SHA-256 hashes, offline verification, tamper detection. |
-| 🦀 **Rust accelerator** | `crates/veritas-core` — dependency-free, 17.9x faster token masking, pure-Python fallback on every call. |
+| 🦀 **Rust accelerator** | `crates/vexx-core` — dependency-free, 17.9x faster token masking, pure-Python fallback on every call. |
 | 🔌 **Model bridges** | HF / vLLM / SGLang / llama.cpp logits processors, async stream proxy, Gumbel-max diffusion, OpenAI/Instructor proxy. |
 | 🧩 **Domain cartridges** | `quant`, `sql`, `sec`, `or_sched`, `stat`, `phys`, `chem`, `code` — deterministic reference checks, no mandatory NumPy/z3/SymPy. |
 | 🖥️ **CLI** | `check-spec`, `verify`, `verify-proof`, `inspect`, `synth`, `doctor`, `export-rl`, `explain-unsat`, `serve` — compile, verify, prove, and diagnose from the terminal. |
 | 🧮 **KL-distortion receipts** | `result.receipt()` — per-field KL divergence introduced by masking (`-log(accepted probability mass)`), content hashes and budget counters. |
-| 🪪 **MCP firewall** | `vt.VeritasMcpSession` / `@verified_tool` — LTLf temporal masking of tool picks, symbolic env binding (`last_*`), spend caps, taint tracking on untrusted strings. |
-| 🧪 **Minimal relaxation wizard** | `veritas explain-unsat` — pinpoints the minimal single-clause widening/raising or proves the conflict is structural. |
-| 🚆 **TRL export** | `veritas export-rl` — decoder traces → DPO/GRPO JSONL with SHA-256 manifests for local fine-tuning. |
-| 🧱 **Reverse proxy** | `veritas serve` — OpenAI-compatible `/v1/chat/completions` in front of an upstream; non-streaming responses are re-verified (422 on violation), streaming responses carry a `veritas_certificate`. |
+| 🪪 **MCP firewall** | `vt.VexxMcpSession` / `@verified_tool` — LTLf temporal masking of tool picks, symbolic env binding (`last_*`), spend caps, taint tracking on untrusted strings. |
+| 🧪 **Minimal relaxation wizard** | `vexx explain-unsat` — pinpoints the minimal single-clause widening/raising or proves the conflict is structural. |
+| 🚆 **TRL export** | `vexx export-rl` — decoder traces → DPO/GRPO JSONL with SHA-256 manifests for local fine-tuning. |
+| 🧱 **Reverse proxy** | `vexx serve` — OpenAI-compatible `/v1/chat/completions` in front of an upstream; non-streaming responses are re-verified (422 on violation), streaming responses carry a `vexx_certificate`. |
 
 ---
 
-## 🆕 Veritas 1.5 in 30 seconds
+## 🆕 Vexx 1.5 in 30 seconds
 
 ```python
-import veritas as vt
+import vexx as vt
 
 # 1. Re-verified receipts: per-field KL distortion + content hashes
 result = vt.generate(model=model, prompt="port", spec=portfolio)
@@ -101,7 +101,7 @@ print(result.receipt())
 # {'sha256': ..., 'status': 'PASS', 'field_kl_divergence': {'weight_a': 3.47, ...}, ...}
 
 # 2. The MCP firewall for agent tool calls
-session = vt.VeritasMcpSession(temporal_policy=vt.before("lookup_order", "issue_refund"))
+session = vt.VexxMcpSession(temporal_policy=vt.before("lookup_order", "issue_refund"))
 
 @session.verified_tool(name="issue_refund", requires_taint_free=True)
 def issue_refund(args, state):
@@ -110,9 +110,9 @@ def issue_refund(args, state):
     return {"refunded": args.refund_amount}
 
 # 3. Terminal tooling
-#   veritas explain-unsat schema.py   # minimal slack that repairs an UNSAT spec
-#   veritas export-rl traces.jsonl --format dpo -o train.jsonl
-#   veritas serve --upstream http://localhost:11434/v1 --spec-module schemas.py --port 8080
+#   vexx explain-unsat schema.py   # minimal slack that repairs an UNSAT spec
+#   vexx export-rl traces.jsonl --format dpo -o train.jsonl
+#   vexx serve --upstream http://localhost:11434/v1 --spec-module schemas.py --port 8080
 ```
 
 Full notes: [docs/1.5-release.md](docs/1.5-release.md).
@@ -122,7 +122,7 @@ Full notes: [docs/1.5-release.md](docs/1.5-release.md).
 ## 📦 Install
 
 ```bash
-pip install veritas-ai
+pip install vexx-ai
 ```
 
 Pure Python — no Rust toolchain required. Optional extras:
@@ -137,18 +137,18 @@ Pure Python — no Rust toolchain required. Optional extras:
 Source-tree development without installation:
 
 ```bash
-git clone https://github.com/sahil-gaikwad94/veritas..git
-cd veritas..
+git clone https://github.com/sahil-gaikwad94/vexx..git
+cd vexx..
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-PYTHONPATH=python .venv/bin/veritas --help
+PYTHONPATH=python .venv/bin/vexx --help
 ```
 
 Optional native Rust accelerator (installed separately, used only as an accelerator — Python stays authoritative):
 
 ```bash
 # Build the wheel
-maturin build --release -m crates/veritas-py/Cargo.toml -o dist
+maturin build --release -m crates/vexx-py/Cargo.toml -o dist
 pip install --no-deps dist/*.whl
 ```
 
@@ -162,7 +162,7 @@ parity guarantees.
 ### A schema that cannot lie
 
 ```python
-import veritas as vt
+import vexx as vt
 from pydantic import BaseModel, Field
 
 
@@ -209,8 +209,8 @@ pass. `report.raise_if_failed()` raises `vt.VerificationError` for guards and to
 ### Solver-guided generation
 
 ```python
-from veritas.testing import StructuredReasoningModel
-import veritas as vt
+from vexx.testing import StructuredReasoningModel
+import vexx as vt
 
 model = StructuredReasoningModel()      # deterministic mock; any next_logits adapter works
 result = vt.generate(model=model, prompt="produce a portfolio", spec=portfolio)
@@ -221,7 +221,7 @@ print(result.report.status)             # verified before the result is returned
 ```
 
 The engine is model-agnostic: a model exposes
-`next_logits(prefix_text) -> Mapping[str, float]`. `veritas.testing` supplies deterministic
+`next_logits(prefix_text) -> Mapping[str, float]`. `vexx.testing` supplies deterministic
 character models for tests; the bridges package adapts real HF, vLLM, SGLang and
 llama.cpp tokenizers.
 
@@ -233,7 +233,7 @@ llama.cpp tokenizers.
 <summary>Verify a portfolio instance</summary>
 
 ```bash
-python -m veritas verify path/to/schema.py instance.json --json
+python -m vexx verify path/to/schema.py instance.json --json
 ```
 Exit 0 only for `PASS`.
 </details>
@@ -257,7 +257,7 @@ hashes. Verification is offline and re-evaluates the constraints from the embedd
 <summary>Compile a schema and run the feasibility gate</summary>
 
 ```bash
-python -m veritas check-spec path/to/schema.py --json
+python -m vexx check-spec path/to/schema.py --json
 ```
 </details>
 
@@ -265,7 +265,7 @@ python -m veritas check-spec path/to/schema.py --json
 <summary>Inspect a decode trace</summary>
 
 ```bash
-python -m veritas inspect trace.json --out report.html
+python -m vexx inspect trace.json --out report.html
 ```
 Renders a standalone HTML report from a decode trace.
 </details>
@@ -274,8 +274,8 @@ Renders a standalone HTML report from a decode trace.
 <summary>Synthesize a schema from JSON examples</summary>
 
 ```bash
-python -m veritas synth --from-json examples.json --out generated_schema.py
-python -m veritas check-spec generated_schema.py
+python -m vexx synth --from-json examples.json --out generated_schema.py
+python -m vexx check-spec generated_schema.py
 ```
 </details>
 
@@ -283,9 +283,9 @@ python -m veritas check-spec generated_schema.py
 <summary>Doctor: check the live engine</summary>
 
 ```bash
-python -m veritas doctor           # human-readable
-python -m veritas doctor --json    # for a bug report
-python -m veritas doctor --strict  # exit 1 unless the native extension is loaded
+python -m vexx doctor           # human-readable
+python -m vexx doctor --json    # for a bug report
+python -m vexx doctor --strict  # exit 1 unless the native extension is loaded
 ```
 </details>
 
@@ -294,7 +294,7 @@ python -m veritas doctor --strict  # exit 1 unless the native extension is loade
 ## 🏗️ Architecture
 
 <p align="center">
-  <img src="docs/assets/architecture.svg" alt="Veritas engine layers architecture diagram" width="900" />
+  <img src="docs/assets/architecture.svg" alt="Vexx engine layers architecture diagram" width="900" />
 </p>
 
 | Layer | Modules | Responsibility |
@@ -305,7 +305,7 @@ python -m veritas doctor --strict  # exit 1 unless the native extension is loade
 | Tier 1 numerics | `interval.py`, `linear.py`, `crane_mode.py` | Affine forms, HC4 contractor, residual containers, clause simplification |
 | Tier 2 search | `nano_solver.py`, `cdcl_jumpback.py` | Deterministic linear solver with unsat cores, CDCL conflict branches, tabu prefixes |
 | Acceleration | `zero_dof.py`, `token_healer.py` | Ready-field derivation, canonical JSON Jump-Forward splices, boundary healing |
-| Native engine | `crates/veritas-core` | Dependency-free Rust ports of every layer above: intervals, JSON automaton, tri-state evaluator, HC4 contractor, exact solver, CRANE, CDCL jumpback, 0-DoF splicing, token healing, SMT-LIB emission. Used as an accelerator; Python stays authoritative |
+| Native engine | `crates/vexx-core` | Dependency-free Rust ports of every layer above: intervals, JSON automaton, tri-state evaluator, HC4 contractor, exact solver, CRANE, CDCL jumpback, 0-DoF splicing, token healing, SMT-LIB emission. Used as an accelerator; Python stays authoritative |
 | Decoding | `decode.py` | Session/engine orchestration, masks, splices, final verification, telemetry and trace |
 | Verification | `evaluate.py`, `instance.py` | Total concrete evaluator, tri-state logic, derived fill, reports, minimal cores |
 | Proofs | `proof/certificate.py` | Self-contained SMT-LIB2 + witness certificates, hashes, offline verification, tamper detection |
@@ -428,8 +428,8 @@ the fact. `vt.verified_tool(spec=..., world_state=...)` verifies a tool's return
 the caller sees it and can attach a proof.
 
 ```python
-from veritas.ltlf import always, before
-from veritas.cartridges.sec import WorldState
+from vexx.ltlf import always, before
+from vexx.cartridges.sec import WorldState
 
 state = WorldState()
 state.assert_fact("authenticated")
@@ -442,35 +442,35 @@ state.before_tool_call("transfer", {"amount": 10})
 
 ```bash
 # Compile a schema and run the 0-token feasibility gate.
-python -m veritas check-spec path/to/schema.py --json
+python -m vexx check-spec path/to/schema.py --json
 
 # Verify a JSON instance; exit 0 only for PASS.
-python -m veritas verify path/to/schema.py instance.json
+python -m vexx verify path/to/schema.py instance.json
 
 # Re-verify a proof certificate offline; exit 0 only when every check passes.
-python -m veritas verify-proof proof.json
+python -m vexx verify-proof proof.json
 
 # Render a decode trace to a standalone HTML report.
-python -m veritas inspect trace.json --out report.html
+python -m vexx inspect trace.json --out report.html
 
 # Infer a schema module from JSON examples, then compile the generated module.
-python -m veritas synth --from-json examples.json --out generated_schema.py
-python -m veritas check-spec generated_schema.py
+python -m vexx synth --from-json examples.json --out generated_schema.py
+python -m vexx check-spec generated_schema.py
 
 # Report the live engine: reference or accelerated, wire version, platform.
-python -m veritas doctor           # human-readable
-python -m veritas doctor --json    # for a bug report
-python -m veritas doctor --strict  # exit 1 unless the native extension is loaded
+python -m vexx doctor           # human-readable
+python -m vexx doctor --json    # for a bug report
+python -m vexx doctor --strict  # exit 1 unless the native extension is loaded
 
 # Minimal repair for an infeasible spec: per-clause minimal slack, or "structural".
-python -m veritas explain-unsat schema.py [--json]
+python -m vexx explain-unsat schema.py [--json]
 
 # Export decoder traces as TRL-ready preference data (DPO or GRPO).
-python -m veritas export-rl traces.jsonl --format dpo -o train_dpo.jsonl
-python -m veritas export-rl traces.jsonl --format grpo -o train_grpo.jsonl
+python -m vexx export-rl traces.jsonl --format dpo -o train_dpo.jsonl
+python -m vexx export-rl traces.jsonl --format grpo -o train_grpo.jsonl
 
 # OpenAI-compatible verification reverse proxy for structured outputs.
-veritas serve --upstream http://127.0.0.1:11434/v1 --spec-module schemas.py --spec portfolio --port 8080
+vexx serve --upstream http://127.0.0.1:11434/v1 --spec-module schemas.py --spec portfolio --port 8080
 
 # Trace capture: DecodeConfig(rl_trace_path="traces.jsonl") persists conflict-branch
 # records (with the repaired completion attached once the run verifies).
@@ -497,15 +497,15 @@ with the extension built they run, so the whole suite is **466 passed, 0 skipped
 every other test then exercises the native masks and numeric prefixes.
 
 The Rust engine has its own 69 unit tests plus 12 property tests
-(`crates/veritas-core/tests/soundness.rs`) that refutes randomized constraints against a
+(`crates/vexx-core/tests/soundness.rs`) that refutes randomized constraints against a
 brute-force grid, re-checks every UNSAT core standalone and cross-checks the automaton against
 the prefix classifier. CI runs:
 
 ```bash
-cargo test -p veritas-core --all-targets
-cargo clippy -p veritas-core --all-targets -- -D warnings
-cargo build --release -p veritas-py
-cargo build -p veritas-wasm --target wasm32-unknown-unknown
+cargo test -p vexx-core --all-targets
+cargo clippy -p vexx-core --all-targets -- -D warnings
+cargo build --release -p vexx-py
+cargo build -p vexx-wasm --target wasm32-unknown-unknown
 ```
 
 Useful focused suites:
@@ -526,9 +526,9 @@ Useful focused suites:
 
 - The **Python engine is the complete, tested product surface** in this repository; the Rust
   engine is a tested accelerator with the same semantics, not a replacement API.
-- `crates/veritas-core` is dependency-free (no crates, no C toolchain) and its 68 unit tests,
+- `crates/vexx-core` is dependency-free (no crates, no C toolchain) and its 68 unit tests,
   12 property tests, `clippy -D warnings`, the pyo3 build and the wasm build all run in CI.
-  Using Veritas needs no Rust toolchain; every native claim here is backed by a CI run rather
+  Using Vexx needs no Rust toolchain; every native claim here is backed by a CI run rather
   than a developer's local build.
 - On a GitHub runner the accelerator is **17.9x** faster at `TokenMasker.valid_mask` over a
   605-token vocabulary and **1.5x** faster at `Interval.from_numeric_prefix` (4.07 ms → 0.23 ms
@@ -537,10 +537,10 @@ Useful focused suites:
   (build, wire format, fallback and panic behaviour, what is and is not accelerated) is
   `docs/NATIVE.md`. The first is a per-token loop, the
   second is a handful of float operations dominated by the call boundary.
-- The native path is preferred only when `veritas.native.available()` is true, and every
+- The native path is preferred only when `vexx.native.available()` is true, and every
   wrapper falls back to pure Python; `tests/test_native_backend.py` pins the parity, so a
-  native regression costs speed, not soundness. `veritas.native.info()` reports the loaded
-  engine and why it is missing otherwise. Set **`VERITAS_NO_NATIVE=1`** to force the reference
+  native regression costs speed, not soundness. `vexx.native.info()` reports the loaded
+  engine and why it is missing otherwise. Set **`VEXX_NO_NATIVE=1`** to force the reference
   path (checked per call, no reinstall), and run `python benchmarks/native_speedup.py` to see
   what the accelerator actually buys on your machine instead of trusting a headline number.
 - The grammar tier recognizes **JSON**, not arbitrary context-free grammars. Schema-guided
@@ -571,19 +571,19 @@ Useful focused suites:
   schema.
 
 The design documents that drove the implementation are in
-`Veritas Architecture And Math Spec.md`, `Veritas Api And Feature Handbook.md` and
-`Veritas Implementation Blueprint And Prompts.md`.
+`Vexx Architecture And Math Spec.md`, `Vexx Api And Feature Handbook.md` and
+`Vexx Implementation Blueprint And Prompts.md`.
 
 ---
 
-## 🤝 Use Veritas if
+## 🤝 Use Vexx if
 
-**Use Veritas if** you need structured generation where correctness is non-negotiable:
+**Use Vexx if** you need structured generation where correctness is non-negotiable:
 financial portfolios, SQL that must pass read-only + tenant checks, tool calls with
 preconditions, scheduling with deadlines, or any artifact that ships with a proof you can
 archive and verify offline.
 
-**Don't use Veritas if** you need unconstrained free-form generation, arbitrary context-free
+**Don't use Vexx if** you need unconstrained free-form generation, arbitrary context-free
 grammars beyond JSON, or real-time SIMD-accelerated masking at massive vocabulary scale — the
 grammar tier is JSON, and token masking is exact but a Python reference implementation
 (accelerated for the two hot call sites by the optional Rust engine).
@@ -592,13 +592,13 @@ grammar tier is JSON, and token masking is exact but a Python reference implemen
 
 ## 🔗 Links
 
-- [PyPI: veritas-ai](https://pypi.org/project/veritas-ai/)
-- [GitHub repository](https://github.com/sahil-gaikwad94/veritas..)
-- [Issue tracker](https://github.com/sahil-gaikwad94/veritas../issues)
+- [PyPI: vexx-ai](https://pypi.org/project/vexx-ai/)
+- [GitHub repository](https://github.com/sahil-gaikwad94/vexx..)
+- [Issue tracker](https://github.com/sahil-gaikwad94/vexx../issues)
 - [Native engine contract](docs/NATIVE.md)
 - [Benchmarks](docs/BENCHMARKS.md)
 - [Audit notes](docs/AUDIT.md)
-- Design specs: [Architecture & Math](docs/specs/Veritas%20Architecture%20And%20Math%20Spec.md) • [API & Feature Handbook](docs/specs/Veritas%20Api%20And%20Feature%20Handbook.md) • [Implementation Blueprint](docs/specs/Veritas%20Implementation%20Blueprint%20And%20Prompts.md)
+- Design specs: [Architecture & Math](docs/specs/Vexx%20Architecture%20And%20Math%20Spec.md) • [API & Feature Handbook](docs/specs/Vexx%20Api%20And%20Feature%20Handbook.md) • [Implementation Blueprint](docs/specs/Vexx%20Implementation%20Blueprint%20And%20Prompts.md)
 
 ---
 

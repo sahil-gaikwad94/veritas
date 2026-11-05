@@ -1,4 +1,4 @@
-"""Tests for ``veritas explain-unsat`` (minimal relaxation wizard)."""
+"""Tests for ``vexx explain-unsat`` (minimal relaxation wizard)."""
 
 import sys
 from pathlib import Path
@@ -7,15 +7,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from pydantic import BaseModel, Field
 
-import veritas as vt
-from veritas.cli.main import main
-from veritas.elastic import explain_unsat
+import vexx as vt
+from vexx.cli.main import main
+from vexx.elastic import explain_unsat
 
 
 def test_bound_conflict_reported_exactly(tmp_path, capsys):
     path = tmp_path / "bound_unsat.py"
     path.write_text(
-        "import veritas as vt\n"
+        "import vexx as vt\n"
         "from pydantic import BaseModel, Field\n"
         "\n"
         "class P(BaseModel):\n"
@@ -54,7 +54,7 @@ def test_clause_conflict_gets_minimal_slack():
 def test_clause_conflict_cli_exit_codes(tmp_path):
     path = tmp_path / "clause_unsat.py"
     path.write_text(
-        "import veritas as vt\n"
+        "import vexx as vt\n"
         "from pydantic import BaseModel, Field\n"
         "\n"
         "class P(BaseModel):\n"
@@ -74,7 +74,7 @@ def test_clause_conflict_cli_exit_codes(tmp_path):
 def test_sat_spec_exits_zero(tmp_path, capsys):
     path = tmp_path / "sat.py"
     path.write_text(
-        "import veritas as vt\n"
+        "import vexx as vt\n"
         "from pydantic import BaseModel, Field\n"
         "\n"
         "class P(BaseModel):\n"

@@ -19,8 +19,8 @@ import time
 
 from pydantic import BaseModel, Field
 
-import veritas as vt
-from veritas.testing import MockCharModel
+import vexx as vt
+from vexx.testing import MockCharModel
 
 
 class Linear(BaseModel):
@@ -60,7 +60,7 @@ def main() -> int:
 
     summary = {
         "benchmark": "decode_smoke",
-        "model": "veritas.testing.MockCharModel",
+        "model": "vexx.testing.MockCharModel",
         "iterations": args.iterations,
         "failures": failures,
         "latency_ms": {

@@ -190,22 +190,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
-name = "veritas-core"
+name = "vexx-core"
 version = "2.1.0"
 
 [[package]]
-name = "veritas-py"
+name = "vexx-py"
 version = "2.1.0"
 dependencies = [
  "pyo3",
- "veritas-core",
+ "vexx-core",
 ]
 
 [[package]]
-name = "veritas-wasm"
+name = "vexx-wasm"
 version = "2.1.0"
 dependencies = [
- "veritas-core",
+ "vexx-core",
  "wasm-bindgen",
 ]
 

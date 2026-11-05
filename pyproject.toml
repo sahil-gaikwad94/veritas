@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "veritas-ai"
+name = "vexx-ai"
 version = "2.1.0"
 description = "Neuro-symbolic solver-guided decoding and formal verification engine"
 readme = "README.md"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-veritas = "veritas.cli.main:main"
+vexx = "vexx.cli.main:main"
 
 [project.optional-dependencies]
 z3 = ["z3-solver>=4.13"]
@@ -29,7 +29,7 @@ dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "build>=1.2"]
 where = ["python"]
 
 [tool.setuptools.package-data]
-veritas = ["py.typed"]
+vexx = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -45,9 +45,9 @@ select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501", "E741", "B008", "B905"]
 
 [tool.ruff.lint.isort]
-# ``veritas`` lives under ``python/``; a stray root-level checkout symlink must not
+# ``vexx`` lives under ``python/``; a stray root-level checkout symlink must not
 # change classification between dev machines and CI, so pin it explicitly.
-known-first-party = ["veritas"]
+known-first-party = ["vexx"]
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F403"]
-"python/veritas/cartridges/code.py" = ["F403"]
+"python/vexx/cartridges/code.py" = ["F403"]

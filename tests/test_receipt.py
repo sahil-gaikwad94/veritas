@@ -9,12 +9,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 
-import veritas as vt
-from veritas.decode import _mask_kl
-from veritas.testing import MockCharModel
+import vexx as vt
+from vexx.decode import _mask_kl
+from vexx.testing import MockCharModel
 
 SCHEMA_SOURCE = '''
-import veritas as vt
+import vexx as vt
 from pydantic import BaseModel, Field
 
 class Portfolio(BaseModel):
@@ -48,7 +48,7 @@ def test_mask_kl_measures_lost_mass():
 
 def test_receipt_reports_content_and_distortion(tmp_path):
     schema_path = _schema_module(tmp_path)
-    from veritas.cli.main import load_schemas
+    from vexx.cli.main import load_schemas
 
     schema = load_schemas(str(schema_path))[0]
     result = vt.generate(model=MockCharModel(), prompt="port", spec=schema)
@@ -66,7 +66,7 @@ def test_receipt_reports_content_and_distortion(tmp_path):
 
 def test_receipt_attempts_and_counters(tmp_path):
     schema_path = _schema_module(tmp_path)
-    from veritas.cli.main import load_schemas
+    from vexx.cli.main import load_schemas
 
     schema = load_schemas(str(schema_path))[0]
     result = vt.generate(model=MockCharModel(), prompt="port", spec=schema)

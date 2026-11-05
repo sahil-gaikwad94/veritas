@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from pydantic import BaseModel, Field
 
-import veritas as vt
+import vexx as vt
 
 
 class SimpleModel(BaseModel):

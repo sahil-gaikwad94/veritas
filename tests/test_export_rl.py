@@ -1,4 +1,4 @@
-"""Tests for ``veritas export-rl`` and decoder conflict-trace capture."""
+"""Tests for ``vexx export-rl`` and decoder conflict-trace capture."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.cli.main import main
+from vexx.cli.main import main
 
 TRACES = [
     {

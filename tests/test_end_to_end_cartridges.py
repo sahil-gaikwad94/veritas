@@ -5,15 +5,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.bridges.instructor_bridge import INSTRUCTOR_MODE, patch_openai
-from veritas.cartridges.or_sched import no_overlap
-from veritas.cartridges.phys import FORCE, homogeneous
-from veritas.cartridges.quant import gaap_balance, portfolio_weights_valid, sharpe_ratio
-from veritas.cartridges.sec import WorldState
-from veritas.cartridges.sql import SqlVerifier
-from veritas.cartridges.stat import frechet_lower, frechet_upper, probability_simplex
-from veritas.cli.main import main
-from veritas.rl.collector import VeritasRLCollector
+from vexx.bridges.instructor_bridge import INSTRUCTOR_MODE, patch_openai
+from vexx.cartridges.or_sched import no_overlap
+from vexx.cartridges.phys import FORCE, homogeneous
+from vexx.cartridges.quant import gaap_balance, portfolio_weights_valid, sharpe_ratio
+from vexx.cartridges.sec import WorldState
+from vexx.cartridges.sql import SqlVerifier
+from vexx.cartridges.stat import frechet_lower, frechet_upper, probability_simplex
+from vexx.cli.main import main
+from vexx.rl.collector import VexxRLCollector
 
 
 def test_quant():
@@ -55,11 +55,11 @@ def test_or():
 def test_bridge():
     c = patch_openai(object())
     assert c is not None
-    assert INSTRUCTOR_MODE == "veritas"
+    assert INSTRUCTOR_MODE == "vexx"
 
 
 def test_rl():
-    col = VeritasRLCollector()
+    col = VexxRLCollector()
     col.record_conflict_branch(None, None, [1,2])
     # Incomplete conflict records are not DPO pairs.
     assert col.export_step_dpo()["num_records"] == 0
