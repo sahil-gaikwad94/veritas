@@ -1,4 +1,4 @@
-# Veritas engineering audit
+# Vexx engineering audit
 
 Audit date: 2026-11-01. Baseline: `f536a73`, Python 3.11, 122 passing tests.
 
@@ -38,7 +38,7 @@ A trustworthy core must precede those optimizations. In particular, a fast path 
 
 ## Trust boundaries
 
-* A Veritas certificate is a **recheckable witness artifact**, not a theorem-prover proof or
+* A Vexx certificate is a **recheckable witness artifact**, not a theorem-prover proof or
   a digital signature. Anyone can recompute an unkeyed SHA-256 hash. Bind verification to a
   trusted spec digest, or authenticate the artifact in the application's signing system.
 * Offline verification covers the embedded VIR and supported structural JSON Schema. Arbitrary
@@ -86,7 +86,7 @@ Validation: `ruff check python tests` clean; `pytest tests/ -q` → **378 passed
 
 ### Remaining known limits
 
-* The Rust/Wasm/PyO3 workspace is no longer scaffolding: `veritas-core` is a dependency-free crate with unit and property tests, and CI compiles it, builds the `abi3` extension and the `wasm32-unknown-unknown` target. It was still not compiled in the audit sandbox (no toolchain); every native claim in this repository is backed by a CI run, not a local one.
+* The Rust/Wasm/PyO3 workspace is no longer scaffolding: `vexx-core` is a dependency-free crate with unit and property tests, and CI compiles it, builds the `abi3` extension and the `wasm32-unknown-unknown` target. It was still not compiled in the audit sandbox (no toolchain); every native claim in this repository is backed by a CI run, not a local one.
 * Schema masking supports the documented subset only; unsupported keywords fail loudly.
 * Generic llama.cpp GBNF is JSON-only; schema-specific GBNF generation is not implemented.
 * Quadratic interval contraction is not implemented; concrete verification remains
@@ -95,7 +95,7 @@ Validation: `ruff check python tests` clean; `pytest tests/ -q` → **378 passed
   validators require the original trusted schema.
 
 
-## Second pass: empirical probing (2026-11-02, branch `arena/167f6e2b-veritas`)
+## Second pass: empirical probing (2026-11-02, branch `arena/167f6e2b-vexx`)
 
 The remediation above was validated against the *claims* in the docs. This pass instead
 ran adversarial probes against the shipped engine and fixed what they exposed. Every item
@@ -146,23 +146,23 @@ installs only `dev,z3` so this contract remains tested.
 
 The P1/P2 packaging and placeholder findings are closed. What changed, and how it is checked:
 
-* Every layer of the reference engine has a Rust port in `crates/veritas-core`: arbitrary
+* Every layer of the reference engine has a Rust port in `crates/vexx-core`: arbitrary
   precision rationals, outward-rounded intervals, the JSON pushdown automaton and prefix
   classifier, the tri-state evaluator, the HC4 contractor, the exact linear solver with
   infeasibility cores, CRANE mode selection, CDCL restart jumpback, 0-DoF splicing, token
   healing, SMT-LIB emission and the wire framing. The crate has **no dependencies**, so a
   native build needs no C toolchain and no third-party supply chain.
-* `crates/veritas-py` exposes those ports through `abi3-py311` PyO3 bindings and
-  `crates/veritas-wasm` through `wasm-bindgen`; CI builds both. Neither is required to
-  install or import Veritas.
-* Soundness is tested as a property, not only as examples: `crates/veritas-core/tests/soundness.rs`
+* `crates/vexx-py` exposes those ports through `abi3-py311` PyO3 bindings and
+  `crates/vexx-wasm` through `wasm-bindgen`; CI builds both. Neither is required to
+  install or import Vexx.
+* Soundness is tested as a property, not only as examples: `crates/vexx-core/tests/soundness.rs`
   refutes randomized constraints against a brute-force grid, re-checks every UNSAT core
   standalone, checks the numeric prefix mask against exhaustive completion of short literals,
   and cross-checks the automaton against the prefix classifier on random strings.
 * Parity with the Python engine is pinned by 38 hand-picked cases plus three randomized
   differential sweeps in `tests/test_native_backend.py` (prefix verdicts, vocabulary masks,
   numeric prefixes), so a native regression costs speed, not soundness.
-* `VERITAS_NO_NATIVE=1` disables the accelerator at runtime without reinstalling, which is
+* `VEXX_NO_NATIVE=1` disables the accelerator at runtime without reinstalling, which is
   what makes the A/B comparison in `benchmarks/native_speedup.py` meaningful and gives an
   operator a one-variable rollback. A Rust panic degrades to the reference path instead of
   escaping as a `BaseException`, and `docs/NATIVE.md` records the whole contract.

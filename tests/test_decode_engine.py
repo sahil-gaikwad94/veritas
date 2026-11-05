@@ -9,10 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 import pytest
 from pydantic import BaseModel
 
-import veritas as vt
-from veritas.decode import DecodeConfig, VeritasSession
-from veritas.json_pda import JSONPushdownAutomaton, is_complete_json
-from veritas.testing import MockCharModel, RandomCharModel
+import vexx as vt
+from vexx.decode import DecodeConfig, VexxSession
+from vexx.json_pda import JSONPushdownAutomaton, is_complete_json
+from vexx.testing import MockCharModel, RandomCharModel
 
 
 class Linear(BaseModel):
@@ -73,7 +73,7 @@ def nonlinear(p: Product):
 
 
 def test_linear_generation_is_valid_and_constrained():
-    session = VeritasSession(linear, MockCharModel(), DecodeConfig())
+    session = VexxSession(linear, MockCharModel(), DecodeConfig())
     result = session.run(prompt="pick two weights that sum to one")
     assert result.ok, result.report.summary_line()
     assert is_complete_json(result.text)
@@ -86,7 +86,7 @@ def test_linear_generation_is_valid_and_constrained():
 
 
 def test_container_residual_accumulator_and_zero_dof_splice():
-    session = VeritasSession(portfolio, MockCharModel())
+    session = VexxSession(portfolio, MockCharModel())
     result = session.run()
     assert result.ok, result.report.summary_line()
     parsed = json.loads(result.text)
@@ -111,7 +111,7 @@ def test_container_residual_accumulator_and_zero_dof_splice():
 
 def test_nonlinear_conflict_triggers_domain_cuts():
     config = DecodeConfig(max_backtracks=8)
-    session = VeritasSession(nonlinear, MockCharModel(), config)
+    session = VexxSession(nonlinear, MockCharModel(), config)
     result = session.run()
     assert result.ok, result.report.summary_line()
     parsed = json.loads(result.text)
@@ -147,7 +147,7 @@ def test_generate_requires_a_model_and_spec():
 def test_random_model_still_produces_valid_json_or_incomplete():
     # A random model is allowed to fail constraints, but the engine must always emit a
     # syntactically valid document and report the outcome honestly.
-    session = VeritasSession(linear, RandomCharModel(seed=7), DecodeConfig(max_backtracks=2))
+    session = VexxSession(linear, RandomCharModel(seed=7), DecodeConfig(max_backtracks=2))
     result = session.run()
     assert is_complete_json(result.text)
     assert result.report.status in ("PASS", "FAIL", "INCOMPLETE")
@@ -171,7 +171,7 @@ def test_engine_respects_explicit_bounds():
         vt.require(p.x >= 0.2)
         vt.require(p.x <= 0.3)
 
-    session = VeritasSession(bounded, MockCharModel())
+    session = VexxSession(bounded, MockCharModel())
     result = session.run()
     assert result.ok, result.report.summary_line()
     value = json.loads(result.text)["x"]

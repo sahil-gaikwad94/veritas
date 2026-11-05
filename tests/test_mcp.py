@@ -1,4 +1,4 @@
-"""Tests for the stateful MCP firewall (``veritas.mcp`` / ``vt.VeritasMcpSession``)."""
+"""Tests for the stateful MCP firewall (``vexx.mcp`` / ``vt.VexxMcpSession``)."""
 
 import sys
 from pathlib import Path
@@ -9,10 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from pydantic import BaseModel
 
-import veritas as vt
-from veritas import mcp
-from veritas.cartridges.sec import PolicyViolation
-from veritas.mcp import McpState, UntrustedString, VeritasMcpSession
+import vexx as vt
+from vexx import mcp
+from vexx.cartridges.sec import PolicyViolation
+from vexx.mcp import McpState, UntrustedString, VexxMcpSession
 
 
 class RefundArgs(BaseModel):
@@ -21,8 +21,8 @@ class RefundArgs(BaseModel):
     reason_code: str
 
 
-def _refund_session() -> VeritasMcpSession:
-    session = VeritasMcpSession(
+def _refund_session() -> VexxMcpSession:
+    session = VexxMcpSession(
         temporal_policy=vt.before("lookup_order", "issue_refund"),
         max_session_spend=100.0,
     )
@@ -93,7 +93,7 @@ def test_tainted_input_rejected():
 
 
 def test_tainted_nested_input_rejected():
-    session = VeritasMcpSession(max_session_spend=10.0)
+    session = VexxMcpSession(max_session_spend=10.0)
 
     @session.verified_tool(name="webhook_ingest", requires_taint_free=True)
     def ingest(args, state):
@@ -105,7 +105,7 @@ def test_tainted_nested_input_rejected():
 
 
 def test_spend_cap():
-    session = VeritasMcpSession(max_session_spend=2.0)
+    session = VexxMcpSession(max_session_spend=2.0)
 
     @session.verified_tool(name="report", cost=10.0)
     def report(args, state):
@@ -117,7 +117,7 @@ def test_spend_cap():
 
 
 def test_on_violation_return_mode():
-    session = VeritasMcpSession(
+    session = VexxMcpSession(
         temporal_policy=vt.before("lookup_order", "issue_refund"),
         on_violation="return",
     )
@@ -144,14 +144,14 @@ def test_untrusted_string_survives_pydantic_validation():
 
 
 def test_record_observation_binds_env():
-    session = VeritasMcpSession()
+    session = VexxMcpSession()
     session.record_observation("lookup_order", {"order_id": "ORD-77", "total": 55.0})
     assert session.state.env["last_order_id"] == "ORD-77"
     assert session.state.env["last_total"] == 55.0
 
 
 def test_require_inside_tool_blocks_call():
-    session = VeritasMcpSession()
+    session = VexxMcpSession()
 
     @session.verified_tool(name="guarded")
     def guarded(args, state):

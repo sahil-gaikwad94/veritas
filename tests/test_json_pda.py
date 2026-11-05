@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 import pytest
 
-from veritas.json_pda import (
+from vexx.json_pda import (
     JSONPushdownAutomaton,
     JSONSyntaxError,
     TokenMasker,

@@ -1,6 +1,6 @@
 # The native engine: contract, not folklore
 
-Veritas ships a complete pure-Python engine, plus an optional Rust accelerator that answers a
+Vexx ships a complete pure-Python engine, plus an optional Rust accelerator that answers a
 subset of the same questions faster. This document is the contract between the two: what the
 accelerator is, when it is used, what happens when it fails, and how the "it cannot change a
 verdict" claim is checked.
@@ -12,31 +12,31 @@ faster, and is reverted at the first sign of trouble.**
 
 | crate | role |
 | --- | --- |
-| `crates/veritas-core` | every layer of the reference engine ported to Rust. No dependencies: no crates, no C toolchain, no build scripts |
-| `crates/veritas-py` | PyO3 bindings (module `veritas_py`, `abi3-py311`), built with `maturin` |
-| `crates/veritas-wasm` | `wasm-bindgen` bindings over the same handles, built for `wasm32-unknown-unknown` |
+| `crates/vexx-core` | every layer of the reference engine ported to Rust. No dependencies: no crates, no C toolchain, no build scripts |
+| `crates/vexx-py` | PyO3 bindings (module `vexx_py`, `abi3-py311`), built with `maturin` |
+| `crates/vexx-wasm` | `wasm-bindgen` bindings over the same handles, built for `wasm32-unknown-unknown` |
 
-Installing Veritas never requires a Rust toolchain. The extension is an accelerator a user
+Installing Vexx never requires a Rust toolchain. The extension is an accelerator a user
 opts into:
 
 ```console
-$ maturin build --release -m crates/veritas-py/Cargo.toml -o dist
-$ pip install --no-deps dist/*.whl     # a separate distribution: it provides veritas_py only
+$ maturin build --release -m crates/vexx-py/Cargo.toml -o dist
+$ pip install --no-deps dist/*.whl     # a separate distribution: it provides vexx_py only
 ```
 
-`pip install --no-deps` matters: the wheel provides the `veritas_py` module and nothing else,
-while `python/veritas` stays the package you import. Installing the wheel *over* an editable
+`pip install --no-deps` matters: the wheel provides the `vexx_py` module and nothing else,
+while `python/vexx` stays the package you import. Installing the wheel *over* an editable
 install makes pip treat one as a rename of the other and uninstall it.
 
 ## Selection and failure behaviour
 
-`veritas.native` resolves the engine per call, never at import time:
+`vexx.native` resolves the engine per call, never at import time:
 
 | situation | `available()` | behaviour |
 | --- | --- | --- |
 | extension missing or unimportable | `False` | pure Python; `load_error()` names the exception |
 | `WIRE_VERSION` mismatch | `False` | pure Python; a wire change is a hard boundary, not a guess |
-| `VERITAS_NO_NATIVE=1` (or `true`/`yes`/`on`; `0`/`false`/`no`/`off` are off) | `False` | pure Python; `load_error()` is `disabled by VERITAS_NO_NATIVE` |
+| `VEXX_NO_NATIVE=1` (or `true`/`yes`/`on`; `0`/`false`/`no`/`off` are off) | `False` | pure Python; `load_error()` is `disabled by VEXX_NO_NATIVE` |
 | extension raises `Exception` | `True` | that one call falls back; the error is swallowed |
 | extension panics (PyO3's `PanicException`, a `BaseException`) | `True` | that one call falls back |
 | Ctrl-C / `sys.exit` inside a native call | — | propagates; never converted into a retry |
@@ -46,9 +46,9 @@ The panic row is the subtle one. `except Exception` would not catch a Rust panic
 catches `BaseException` and re-raises `KeyboardInterrupt`/`SystemExit`; the rest of the
 exception hierarchy is treated as "the accelerator is broken, use the reference path".
 
-`veritas doctor` (`veritas.doctor()` / `veritas.native.info()` in Python) reports the live
+`vexx doctor` (`vexx.doctor()` / `vexx.native.info()` in Python) reports the live
 engine and the reason it is missing, which is the fastest way to answer "why is this slow".
-`veritas doctor --strict` exits non-zero unless the accelerator is loaded, so a deployment
+`vexx doctor --strict` exits non-zero unless the accelerator is loaded, so a deployment
 health check can assert the engine it expects instead of hoping.
 
 ## What is actually accelerated
@@ -62,7 +62,7 @@ Two call sites, both on the decode hot path:
 In addition, the native engine exposes a **packed `u64` vocabulary bitset** for whole-row
 masking — `PyVocabularyTrie.mask_bitset(prefix)` returns `ceil(|V| / 64)` words
 (≈ 16 KB for a 128k vocabulary) that a caller can AND into a logits buffer in one
-vectorised operation without rebuilding a boolean list. `python/veritas/native.py` also
+vectorised operation without rebuilding a boolean list. `python/vexx/native.py` also
 provides pure-Python helpers `bitset_from_mask` / `mask_from_bitset` for the same packing,
 so nothing downstream of the ABI is numerically different whether the accelerator is loaded
 or not. The pure-Python `TokenMasker` additionally caches masks by a canonical PDA
@@ -99,8 +99,8 @@ the accelerator rather than guessing:
 
 Four independent layers, all in CI:
 
-1. **Rust unit tests** — 68 examples over the modules, run by `cargo test -p veritas-core`.
-2. **Rust properties** — 12 tests in `crates/veritas-core/tests/soundness.rs`: contractor
+1. **Rust unit tests** — 68 examples over the modules, run by `cargo test -p vexx-core`.
+2. **Rust properties** — 12 tests in `crates/vexx-core/tests/soundness.rs`: contractor
    refutations never contain a satisfying point, UNSAT cores are re-solved standalone, the
    numeric prefix mask keeps every legal completion, the automaton and the parser agree on
    random strings, healing never reports an unverified splice, rendering and parsing are
@@ -121,7 +121,7 @@ Four independent layers, all in CI:
 ## What it is worth
 
 Measured by `benchmarks/native_speedup.py`, which runs the same Python call sites twice — once
-with the extension, once with `VERITAS_NO_NATIVE=1` — on a GitHub `ubuntu-latest` runner
+with the extension, once with `VEXX_NO_NATIVE=1` — on a GitHub `ubuntu-latest` runner
 (Python 3.12.15):
 
 | workload (per call) | pure | native | speedup |

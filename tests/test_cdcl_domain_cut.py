@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.cdcl_jumpback import CdclJumpbackEngine, ClauseCheckpoint
+from vexx.cdcl_jumpback import CdclJumpbackEngine, ClauseCheckpoint
 
 
 def test_culprit_selection_and_jumpback():

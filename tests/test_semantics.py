@@ -5,17 +5,17 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, Field
 
-import veritas as vt
-from veritas.bridges.llamacpp_bridge import patch_llamacpp
-from veritas.cartridges.chem import molecular_weight
-from veritas.cartridges.code_synth import verify_python_source
-from veritas.cartridges.or_sched import SchedulingProblem
-from veritas.cartridges.quant import is_positive_semidefinite
-from veritas.interval import Hc4AffineContractor, Interval
-from veritas.json_pda import JSONSyntaxError
-from veritas.proof.certificate import build_certificate, verify_certificate
-from veritas.schema_pda import SchemaJSONAutomaton
-from veritas.serde import spec_from_dict, spec_to_dict
+import vexx as vt
+from vexx.bridges.llamacpp_bridge import patch_llamacpp
+from vexx.cartridges.chem import molecular_weight
+from vexx.cartridges.code_synth import verify_python_source
+from vexx.cartridges.or_sched import SchedulingProblem
+from vexx.cartridges.quant import is_positive_semidefinite
+from vexx.interval import Hc4AffineContractor, Interval
+from vexx.json_pda import JSONSyntaxError
+from vexx.proof.certificate import build_certificate, verify_certificate
+from vexx.schema_pda import SchemaJSONAutomaton
+from vexx.serde import spec_from_dict, spec_to_dict
 
 
 class Strict(BaseModel):
@@ -155,7 +155,7 @@ def f(value):
     assert any(w.kind == "global_binding" for w in report.warnings)
 
 def test_verify_json_reports_grammar_errors_as_format_errors():
-    from veritas.instance import InstanceFormatError, verify_json
+    from vexx.instance import InstanceFormatError, verify_json
     with pytest.raises(InstanceFormatError):
         verify_json(strict, '{"x": 01}')
 
@@ -163,7 +163,7 @@ def test_verify_json_reports_grammar_errors_as_format_errors():
 def test_synth_sanitizes_identifiers_and_is_deterministic():
     import ast
 
-    from veritas.synth import synth_schema
+    from vexx.synth import synth_schema
 
     samples = [{"bad-name": 1, "class": 2, "UPPER": 3}]
     source = synth_schema(samples, name="Demo")

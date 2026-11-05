@@ -2,13 +2,13 @@
 
 The workload is the *same Python code* twice: ``TokenMasker.valid_mask`` and
 ``Interval.from_numeric_prefix`` are the real call sites the decoder uses, and the only thing
-that changes between the two runs is ``VERITAS_NO_NATIVE``. That makes the comparison honest:
+that changes between the two runs is ``VEXX_NO_NATIVE``. That makes the comparison honest:
 no re-implementation, no re-warmed caches, no cherry-picked API.
 
 Run:
     python benchmarks/native_speedup.py            # comparison table
     python benchmarks/native_speedup.py --json     # machine-readable
-    VERITAS_NO_NATIVE=1 python benchmarks/native_speedup.py --worker   # one side only
+    VEXX_NO_NATIVE=1 python benchmarks/native_speedup.py --worker   # one side only
 
 Without the compiled extension the script says so and exits 0: a benchmark that cannot measure
 must not pretend to.
@@ -109,9 +109,9 @@ def _literals() -> list[str]:
 
 
 def measure(iterations: int, repeats: int) -> dict:
-    from veritas import native
-    from veritas.interval import Interval
-    from veritas.json_pda import JSONPushdownAutomaton, TokenMasker
+    from vexx import native
+    from vexx.interval import Interval
+    from vexx.json_pda import JSONPushdownAutomaton, TokenMasker
 
     vocabulary = _vocabulary()
     # A decoder only ever holds prefixes the grammar allowed, so an invalid one is not a
@@ -174,9 +174,9 @@ def _worker(args) -> int:
 def _child(iterations: int, repeats: int, disabled: bool) -> dict:
     env = dict(os.environ)
     if disabled:
-        env["VERITAS_NO_NATIVE"] = "1"
+        env["VEXX_NO_NATIVE"] = "1"
     else:
-        env.pop("VERITAS_NO_NATIVE", None)
+        env.pop("VEXX_NO_NATIVE", None)
     env["PYTHONPATH"] = os.pathsep.join(
         [os.path.join(REPO_ROOT, "python"), env.get("PYTHONPATH", "")]
     ).strip(os.pathsep)
@@ -233,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not native_side["native_available"]:
         print("native extension not available:", native_side["reason"])
-        print("build it with: maturin build --release -m crates/veritas-py/Cargo.toml -o dist")
+        print("build it with: maturin build --release -m crates/vexx-py/Cargo.toml -o dist")
         print("               pip install --no-deps dist/*.whl")
         print("the pure-Python engine is unaffected; nothing to compare.")
         return 0
@@ -245,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{workload:<18}{numbers['pure']['p50_us']:>14.3f}"
             f"{numbers['native']['p50_us']:>16.3f}{str(numbers['speedup']) + 'x':>10}"
         )
-    print("\np50 over repeated blocks of the same call sites; VERITAS_NO_NATIVE pins the pure path.")
+    print("\np50 over repeated blocks of the same call sites; VEXX_NO_NATIVE pins the pure path.")
     return 0
 
 

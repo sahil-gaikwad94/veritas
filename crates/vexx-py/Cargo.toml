@@ -1,0 +1,13 @@
+[package]
+name = "vexx-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "vexx_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3.workspace = true
+vexx-core = { path = "../vexx-core" }

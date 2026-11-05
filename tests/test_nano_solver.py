@@ -5,11 +5,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.nano_solver import SolverStatus, VeritasNanoSolver
+from vexx.nano_solver import SolverStatus, VexxNanoSolver
 
 
 def test_lra_unsat_core():
-    s = VeritasNanoSolver()
+    s = VexxNanoSolver()
     s.assert_and_track(("le", {"x": 1.0}, 3.0), "c1")  # x <= 3
     s.assert_and_track(("ge", {"x": 1.0}, 5.0), "c2")  # x >= 5
     assert s.check() == SolverStatus.UNSAT
@@ -18,7 +18,7 @@ def test_lra_unsat_core():
 
 
 def test_push_pop():
-    s = VeritasNanoSolver()
+    s = VexxNanoSolver()
     s.push()
     s.assert_and_track(("le", {"x": 1.0}, 3.0), "c1")
     s.pop()
@@ -28,7 +28,7 @@ def test_push_pop():
 
 
 def test_diff_logic_negative_cycle():
-    s = VeritasNanoSolver()
+    s = VexxNanoSolver()
     # x - y <= 5, y - z <= 5, z - x <= -20  (cycle)
     s.assert_and_track(("diff", "x", "y", 5), "e1")
     s.assert_and_track(("diff", "y", "z", 5), "e2")
@@ -39,7 +39,7 @@ def test_diff_logic_negative_cycle():
 
 
 def test_sat_simple():
-    s = VeritasNanoSolver()
+    s = VexxNanoSolver()
     s.assert_and_track(("le", {"x": 1.0, "y": 1.0}, 1.0), "c1")
     s.assert_and_track(("ge", {"x": 1.0}, 0.0), "c2")
     s.assert_and_track(("ge", {"y": 1.0}, 0.0), "c3")

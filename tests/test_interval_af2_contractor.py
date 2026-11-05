@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.interval import AffineForm, Hc4AffineContractor, Interval, ResidualAccumulator
+from vexx.interval import AffineForm, Hc4AffineContractor, Interval, ResidualAccumulator
 
 
 def test_interval_from_numeric_prefix_rejects():
@@ -84,7 +84,7 @@ def test_volume_twist_finite():
 
 
 def test_crane_mode_switch():
-    from veritas.crane_mode import CraneModeController
+    from vexx.crane_mode import CraneModeController
     ctrl = CraneModeController()
     assert ctrl.in_reasoning_scratchpad() is True
     ctrl.feed("hello <think>")
@@ -93,13 +93,13 @@ def test_crane_mode_switch():
 
 
 def test_pda_bitmask():
-    from veritas.pda import PushdownAutomaton
+    from vexx.pda import PushdownAutomaton
     p = PushdownAutomaton(vocab_size=8)
     assert p.get_valid_token_bitmask() == 255
 
 
 def test_shadow_parser():
-    from veritas.shadow_ast import ShadowParser
+    from vexx.shadow_ast import ShadowParser
     sp = ShadowParser()
     out = sp.feed_bytes(b'{"a": 1}', token_idx=0)
     assert isinstance(out, list)

@@ -6,9 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import veritas as vt
-from veritas.ltlf import Trace, at_most, before, eventually, never, occurred, responds
-from veritas.rl.collector import StepRecord, VeritasRLCollector
+import vexx as vt
+from vexx.ltlf import Trace, at_most, before, eventually, never, occurred, responds
+from vexx.rl.collector import StepRecord, VexxRLCollector
 
 
 def _trace():
@@ -61,7 +61,7 @@ def test_world_state_tool_gating():
 
 
 def test_rl_exports_and_manifest(tmp_path):
-    collector = VeritasRLCollector()
+    collector = VexxRLCollector()
     collector.add_preference(
         prompt="allocate",
         chosen='{"a": 0.5, "b": 0.5}',
@@ -84,7 +84,7 @@ def test_rl_exports_and_manifest(tmp_path):
 
 
 def test_process_reward_is_dense_and_bounded():
-    rewards = VeritasRLCollector.process_reward(
+    rewards = VexxRLCollector.process_reward(
         verified=True, backtracks=2, jump_forward_tokens=10, final_margin=0.0, max_backtracks=8
     )
     assert rewards[0] == 1.0

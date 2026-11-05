@@ -3,16 +3,16 @@
 import pytest
 from pydantic import BaseModel, Field
 
-import veritas as vt
-from veritas.bridges.hf_transformers import VeritasLogitsProcessor
-from veritas.cartridges.sec import PolicyViolation
-from veritas.cartridges.sql import SqlCatalog, SqlVerifier
-from veritas.compiler.ast_transpiler import TranspileError
-from veritas.json_pda import JSONSyntaxError, TokenMasker, parse_json
-from veritas.nano_solver import SolverStatus, VeritasNanoSolver
-from veritas.proof.certificate import build_certificate, verify_certificate
-from veritas.schema_pda import SchemaJSONAutomaton
-from veritas.testing import MockCharModel
+import vexx as vt
+from vexx.bridges.hf_transformers import VexxLogitsProcessor
+from vexx.cartridges.sec import PolicyViolation
+from vexx.cartridges.sql import SqlCatalog, SqlVerifier
+from vexx.compiler.ast_transpiler import TranspileError
+from vexx.json_pda import JSONSyntaxError, TokenMasker, parse_json
+from vexx.nano_solver import SolverStatus, VexxNanoSolver
+from vexx.proof.certificate import build_certificate, verify_certificate
+from vexx.schema_pda import SchemaJSONAutomaton
+from vexx.testing import MockCharModel
 
 
 class Box(BaseModel):
@@ -57,7 +57,7 @@ p.x) >= 0)
 
 
 def test_solver_mixed_constraints_unsat_and_core():
-    solver = VeritasNanoSolver()
+    solver = VexxNanoSolver()
     solver.assert_and_track(("le", {0: 1, 1: 1}, 1.0), "sum")
     solver.assert_and_track(("ge", {0: 1}, 0.8), "x")
     solver.assert_and_track(("ge", {1: 1}, 0.8), "y")
@@ -67,7 +67,7 @@ def test_solver_mixed_constraints_unsat_and_core():
 
 
 def test_solver_strict_inequality_witness():
-    solver = VeritasNanoSolver()
+    solver = VexxNanoSolver()
     solver.assert_and_track(("gt", {0: 1}, 0.0), "lo")
     solver.assert_and_track(("lt", {0: 1}, 1.0), "hi")
     assert solver.check() == SolverStatus.SAT
@@ -156,7 +156,7 @@ def test_hf_batch_rows_are_isolated():
         def decode(self, ids, **kwargs):
             return "".join({0: "{", 1: "}", 2: ""}.get(int(i), "") for i in ids)
 
-    processor = VeritasLogitsProcessor(Tok(), spec=None)
+    processor = VexxLogitsProcessor(Tok(), spec=None)
     scores = [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
     processor([[0], [0, 1]], scores)
     # Row 0 is at '{' and may close; row 1 is complete and may emit EOS.

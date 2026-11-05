@@ -22,13 +22,13 @@ jobs:
           set -o pipefail
           {
             echo "== cargo test (engine)"
-            cargo test -p veritas-core --all-targets
+            cargo test -p vexx-core --all-targets
             echo "== cargo clippy (engine, warnings are errors)"
-            cargo clippy -p veritas-core --all-targets -- -D warnings
+            cargo clippy -p vexx-core --all-targets -- -D warnings
             echo "== cargo build (python extension)"
-            cargo build --release -p veritas-py
+            cargo build --release -p vexx-py
             echo "== cargo build (wasm inspector)"
-            cargo build -p veritas-wasm --target wasm32-unknown-unknown
+            cargo build -p vexx-wasm --target wasm32-unknown-unknown
           } 2>&1 | tee /tmp/rust.log
       - name: Annotate the first diagnostics
         if: failure()
@@ -72,15 +72,15 @@ jobs:
           set -o pipefail
           {
             python -m pip install --upgrade pip maturin
-            maturin build --release --manifest-path crates/veritas-py/Cargo.toml -o dist
+            maturin build --release --manifest-path crates/vexx-py/Cargo.toml -o dist
             # A fresh venv keeps the two distributions apart: the wheel provides the
-            # ``veritas_py`` extension module, while ``PYTHONPATH=python`` provides the pure
+            # ``vexx_py`` extension module, while ``PYTHONPATH=python`` provides the pure
             # Python package (pip would otherwise uninstall one as a rename of the other).
             python -m venv /tmp/native-venv
             /tmp/native-venv/bin/python -m pip install --upgrade pip pytest pydantic jsonschema hypothesis sqlglot
             /tmp/native-venv/bin/python -m pip install --no-deps dist/*.whl
-            PYTHONPATH="$PWD/python" /tmp/native-venv/bin/python -c "import veritas, veritas.native as n; assert n.available(), n.load_error(); print(veritas.doctor())"
-            # With veritas_py importable this runs the whole suite *through* the native
+            PYTHONPATH="$PWD/python" /tmp/native-venv/bin/python -c "import vexx, vexx.native as n; assert n.available(), n.load_error(); print(vexx.doctor())"
+            # With vexx_py importable this runs the whole suite *through* the native
             # masks and prefixes, including the 38 parity cases that skip otherwise.
             PYTHONPATH="$PWD/python" /tmp/native-venv/bin/python -m pytest tests/ -q
             # Same call sites twice: with the extension, then with it disabled. Informational
@@ -149,4 +149,4 @@ jobs:
       - run: pytest tests/
       - run: python -m build --wheel -o dist
       - run: python -m pip install --force-reinstall --no-deps dist/*.whl
-      - run: veritas --help
+      - run: vexx --help

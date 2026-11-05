@@ -9,9 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from pydantic import BaseModel, Field
 
-import veritas as vt
-from veritas.decode import DeadEnd, DecodeConfig, VeritasSession
-from veritas.testing import StructuredReasoningModel
+import vexx as vt
+from vexx.decode import DeadEnd, DecodeConfig, VexxSession
+from vexx.testing import StructuredReasoningModel
 
 
 class Portfolio(BaseModel):
@@ -27,7 +27,7 @@ def portfolio(p: Portfolio):
 def test_reflex_feedback_span_is_recorded_but_never_in_json():
     cfg = DecodeConfig(reflex_on_backtrack=True)
     model = StructuredReasoningModel(reasoning="verified adjustment thought")
-    session = VeritasSession(portfolio, model, cfg)
+    session = VexxSession(portfolio, model, cfg)
     session.telemetry.domain_cuts.append({"field": "weight_a", "value": 0.9, "bounds": [0.0, 0.5]})
     exc = DeadEnd("weight_a", "contractor became infeasible after weight_a=0.9")
     session._reflex_feedback(model, exc)
@@ -41,7 +41,7 @@ def test_reflex_feedback_span_is_recorded_but_never_in_json():
 def test_reflex_feedback_trace_note():
     cfg = DecodeConfig(reflex_on_backtrack=True)
     model = StructuredReasoningModel(reasoning="analysis")
-    session = VeritasSession(portfolio, model, cfg)
+    session = VexxSession(portfolio, model, cfg)
     exc = DeadEnd("weight_a", "conflict")
     session._reflex_feedback(model, exc)
     kinds = [step.kind for step in session.trace]

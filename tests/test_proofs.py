@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 import pytest
 from pydantic import BaseModel
 
-import veritas as vt
-from veritas.proof.certificate import (
+import vexx as vt
+from vexx.proof.certificate import (
     ProofCertificate,
     build_certificate,
     verify_certificate,

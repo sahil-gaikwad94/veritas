@@ -5,8 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.token_healer import JumpForwardPrefill, TokenHealer
-from veritas.zero_dof import ZeroDofEngine, ZeroDofRule
+from vexx.token_healer import JumpForwardPrefill, TokenHealer
+from vexx.zero_dof import ZeroDofEngine, ZeroDofRule
 
 
 def test_cascade_evaluation():

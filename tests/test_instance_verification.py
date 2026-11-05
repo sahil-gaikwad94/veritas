@@ -8,9 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from pydantic import BaseModel
 
-import veritas as vt
-from veritas.instance import verify_values
-from veritas.serde import spec_digest, spec_from_dict, spec_to_dict
+import vexx as vt
+from vexx.instance import verify_values
+from vexx.serde import spec_digest, spec_from_dict, spec_to_dict
 
 
 class Linear(BaseModel):

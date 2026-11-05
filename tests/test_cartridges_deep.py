@@ -4,15 +4,15 @@ import math
 
 import pytest
 
-from veritas.cartridges.chem import (
+from vexx.cartridges.chem import (
     analyze_smiles,
     formal_charge_neutral,
     molecular_weight,
     smiles_valence_ok,
 )
-from veritas.cartridges.code_synth import verify_python_source
-from veritas.cartridges.or_sched import SchedulingError, SchedulingProblem
-from veritas.cartridges.phys import (
+from vexx.cartridges.code_synth import verify_python_source
+from vexx.cartridges.or_sched import SchedulingError, SchedulingProblem
+from vexx.cartridges.phys import (
     ACCELERATION,
     ENERGY,
     FORCE,
@@ -22,7 +22,7 @@ from veritas.cartridges.phys import (
     Quantity,
     check_equation,
 )
-from veritas.cartridges.quant import (
+from vexx.cartridges.quant import (
     black_scholes_call,
     cholesky,
     gaap_balance,
@@ -32,15 +32,15 @@ from veritas.cartridges.quant import (
     portfolio_weights_valid,
     quad_form,
 )
-from veritas.cartridges.sql import ForeignKey, SqlCatalog, SqlVerifier
-from veritas.cartridges.stat import (
+from vexx.cartridges.sql import ForeignKey, SqlCatalog, SqlVerifier
+from vexx.cartridges.stat import (
     bayes_consistency,
     frechet_ok,
     is_d_separated,
     probability_simplex,
 )
-from veritas.pda import PushdownAutomaton
-from veritas.shadow_ast import ShadowParser
+from vexx.pda import PushdownAutomaton
+from vexx.shadow_ast import ShadowParser
 
 
 def test_portfolio_statistics_and_cholesky():
@@ -164,7 +164,7 @@ def test_dimensional_analysis_equations():
     assert ok, message
     ok, message = check_equation("sin(v)", "0", symbols)
     assert not ok
-    from veritas.cartridges.phys import Dim
+    from vexx.cartridges.phys import Dim
 
     q = Quantity(2.0, Dim(FORCE))
     assert q.dim.dimensionless is False

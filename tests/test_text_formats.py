@@ -18,10 +18,10 @@ from pydantic import BaseModel, Field, HttpUrl
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-import veritas as vt
-from veritas import textformats
-from veritas.compiler.schema_lowering import lower_pydantic_model
-from veritas.decode import DecodeConfig, VeritasSession
+import vexx as vt
+from vexx import textformats
+from vexx.compiler.schema_lowering import lower_pydantic_model
+from vexx.decode import DecodeConfig, VexxSession
 
 
 class Formatted(BaseModel):
@@ -97,7 +97,7 @@ def test_generation_emits_a_conforming_value_for_every_format():
 
 
 def test_format_witnesses_are_deterministic_and_off_the_sampling_path():
-    session = VeritasSession(formatted_spec, vt.MockCharModel(), DecodeConfig())
+    session = VexxSession(formatted_spec, vt.MockCharModel(), DecodeConfig())
     first = session.run(vt.MockCharModel())
     second = session.run(vt.MockCharModel())
     assert first.text == second.text
@@ -119,7 +119,7 @@ def test_unsupported_format_falls_back_and_stays_honest():
     def unknown_spec(p: Unknown):
         vt.require(p.colour != "")
 
-    session = VeritasSession(unknown_spec, vt.MockCharModel(), DecodeConfig())
+    session = VexxSession(unknown_spec, vt.MockCharModel(), DecodeConfig())
     result = session.run(vt.MockCharModel())
     assert result.telemetry.format_fallbacks, "unknown formats must be reported"
     assert "colour" in result.telemetry.format_fallbacks[0]
@@ -141,7 +141,7 @@ def test_pattern_wins_when_it_disagrees_with_the_format_witness():
     def pinned_spec(p: Pinned):
         vt.require(p.ts != "")
 
-    session = VeritasSession(pinned_spec, vt.MockCharModel(), DecodeConfig())
+    session = VexxSession(pinned_spec, vt.MockCharModel(), DecodeConfig())
     result = session.run(vt.MockCharModel())
     assert result.ok, result.report.summary_line()
     assert result.values["ts"] == "1999-01-01T00:00:00Z"
@@ -176,7 +176,7 @@ def test_verify_instance_accepts_typed_model_values():
 
 
 def test_json_rendering_matches_pydantic_json_mode():
-    from veritas.json_pda import json_value, parse_json
+    from vexx.json_pda import json_value, parse_json
 
     rendered = json_value(
         {

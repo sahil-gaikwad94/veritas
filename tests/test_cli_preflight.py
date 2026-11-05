@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, Field
 
-import veritas as vt
-from veritas.cli.main import load_schemas, main
-from veritas.compiler.preflight import InfeasibleSpecError, initial_domains, run_preflight
+import vexx as vt
+from vexx.cli.main import load_schemas, main
+from vexx.compiler.preflight import InfeasibleSpecError, initial_domains, run_preflight
 
 SCHEMA_SOURCE = '''
-import veritas as vt
+import vexx as vt
 from pydantic import BaseModel
 
 class Pair(BaseModel):
@@ -75,7 +75,7 @@ def test_inspect_cli_writes_html(tmp_path, capsys):
     out = tmp_path / "report.html"
     assert main(["inspect", str(trace), "--out", str(out)]) == 0
     html = out.read_text()
-    assert "veritas inspect" in html
+    assert "vexx inspect" in html
     assert "jump_forward_fields" in html
     assert "0.25" in html
 
@@ -142,14 +142,14 @@ def test_preflight_detects_container_infeasibility():
 
 
 # --------------------------------------------------------------------------------------
-# `veritas doctor`: the one command that answers "which engine am I running?".
+# `vexx doctor`: the one command that answers "which engine am I running?".
 # --------------------------------------------------------------------------------------
 
 def test_doctor_reports_the_reference_engine(capsys):
     assert main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "veritas" in out and "engine" in out
-    assert "reference python" in out or "veritas_py" in out
+    assert "vexx" in out and "engine" in out
+    assert "reference python" in out or "vexx_py" in out
     assert "wire" in out
 
 
@@ -165,7 +165,7 @@ def test_doctor_json_is_machine_readable(capsys):
 
 
 def test_doctor_strict_fails_when_the_accelerator_is_missing(capsys):
-    from veritas import native
+    from vexx import native
 
     expected = 0 if native.available() else 1
     assert main(["doctor", "--strict"]) == expected
@@ -174,10 +174,10 @@ def test_doctor_strict_fails_when_the_accelerator_is_missing(capsys):
 
 
 def test_doctor_explains_the_kill_switch(monkeypatch, capsys):
-    monkeypatch.setenv("VERITAS_NO_NATIVE", "1")
+    monkeypatch.setenv("VEXX_NO_NATIVE", "1")
     assert main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "VERITAS_NO_NATIVE" in out
+    assert "VEXX_NO_NATIVE" in out
     assert main(["doctor", "--strict"]) == 1
 
 
