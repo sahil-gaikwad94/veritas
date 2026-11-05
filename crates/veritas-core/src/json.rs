@@ -315,6 +315,11 @@ impl VocabularyTrie {
         Some(trie)
     }
 
+    /// Number of tokens the trie was built from (`<= |vocabulary|`, empty tokens ignored).
+    pub fn vocabulary_len(&self) -> usize {
+        self.vocabulary.len()
+    }
+
     /// `Token indices with `prefix` as a literal prefix (unsorted, with duplicates removed).
     pub fn tokens_with_prefix(&self, prefix: &str) -> Vec<u32> {
         let mut node_idx = 0usize;

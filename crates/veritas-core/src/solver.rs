@@ -193,7 +193,7 @@ fn eliminate(rows: &[Row], var: u32) -> Res<Vec<Row>> {
 /// divide by it, and encode exactly as (var, numer, denom) triples so buckets compare
 /// exactly.  Constant rows share the empty key.
 fn normalized_key(row: &Row) -> Vec<(u32, i128, i128)> {
-    let mut items: Vec<(u32, Rational)> = row.coeffs.iter().map(|(&var, &coeff)| (var, coeff)).collect();
+    let items: Vec<(u32, Rational)> = row.coeffs.iter().map(|(&var, &coeff)| (var, coeff)).collect();
     if items.is_empty() {
         return Vec::new();
     }

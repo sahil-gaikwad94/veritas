@@ -8,10 +8,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
+
 import veritas as vt
-from veritas.decode import DecodeConfig, _mask_kl
+from veritas.decode import _mask_kl
 from veritas.testing import MockCharModel
-from pydantic import BaseModel, Field
 
 SCHEMA_SOURCE = '''
 import veritas as vt

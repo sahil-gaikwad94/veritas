@@ -7,10 +7,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
+from pydantic import BaseModel
+
 import veritas as vt
 from veritas import mcp
+from veritas.cartridges.sec import PolicyViolation
 from veritas.mcp import McpState, UntrustedString, VeritasMcpSession
-from pydantic import BaseModel
 
 
 class RefundArgs(BaseModel):
@@ -72,10 +74,11 @@ def test_env_binding_and_accumulation():
 def test_require_enforces_env_bound():
     session = _refund_session()
     session._tools["lookup_order"]["fn"]({})
-    with pytest.raises(Exception):
+    with pytest.raises(PolicyViolation) as excinfo:
         session._tools["issue_refund"]["fn"](
             {"order_id": "ORD-99", "refund_amount": 999.0, "reason_code": "ok"}
         )
+    assert "refund exceeds order total" in str(excinfo.value)
 
 
 def test_tainted_input_rejected():

@@ -3,14 +3,13 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+
+from pydantic import BaseModel, Field
 
 import veritas as vt
 from veritas.cli.main import main
 from veritas.elastic import explain_unsat
-from pydantic import BaseModel, Field
 
 
 def test_bound_conflict_reported_exactly(tmp_path, capsys):

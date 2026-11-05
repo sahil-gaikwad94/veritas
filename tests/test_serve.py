@@ -13,14 +13,13 @@ import json
 import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from veritas.serve import _parse_json_candidate, SpecRegistry  # noqa: E402
+from veritas.serve import SpecRegistry, _parse_json_candidate  # noqa: E402
 
 SPEC_MODULE = Path(__file__).parent / "serve_spec_fixture.py"
 
